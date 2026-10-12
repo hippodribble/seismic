@@ -108,6 +108,12 @@ go run ./P190/x/P190preplot2shape -r S survey.p190
 
 The `-r` flag selects the record type to parse; the final argument is the input file path.
 
+## Third-party dependencies and licensing
+
+This project uses external libraries for shapefile generation and GUI display, including `github.com/jonas-p/go-shp` and `fyne.io/fyne/v2`.
+
+Their copyright and licensing remain the property of their respective authors. This repository's own code is covered by the project license, but those third-party libraries are distributed and used under their own terms.
+
 ## Notes and limitations
 
 - The parser assumes fixed-width input and validates the expected numeric ranges.
