@@ -3,6 +3,7 @@ package P190
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strconv"
@@ -11,6 +12,8 @@ import (
 	"github.com/jonas-p/go-shp"
 )
 
+// A P190 NodeRecord represents a single node (non-receiver) record in a P190 file, containing information about a point in a preplot line.
+// Preplots are generally defined using a node record of some kind (S,V,Z etc).
 type NodeRecord struct {
 	Type                          string
 	LineName                      string
@@ -76,6 +79,14 @@ func (p *P190File) Load() error {
 	if err != nil {
 		return fmt.Errorf("no such file: %s", p.Name)
 	}
+	if p.preplotrectype == "auto" {
+		b,err:=io.ReadAll(f)
+		if err!=nil{
+			return fmt.Errorf("error reading file: %s", p.Name)
+		}
+		p.preplotrectype = MostCommonPrefix(string(b))
+		f.Seek(0,0)
+	}
 	sc := bufio.NewScanner(f)
 
 	lines := []PreplotLine{}
@@ -109,7 +120,12 @@ func (p *P190File) Load() error {
 }
 
 // ToShapeFile converts the P190 file data into an ESRI shapefile with the specified filename.
+//
+// The writer is open source, viz github.com/jonas-p/go-shp
 func (p P190File) ToShapeFile(filename string) error {
+	if len(p.Lines) == 0 {
+		return fmt.Errorf("no lines to convert to shapefile")
+	}
 
 	shape, err := shp.Create(filename+".shp", shp.POLYLINE)
 	if err != nil {
@@ -145,4 +161,39 @@ func (p P190File) ToShapeFile(filename string) error {
 	}
 
 	return nil
+}
+
+// MostCommonPrefix returns the most common prefix character in the given text, ignoring lines that start with a space or 'H'.
+//
+// This is useful because P190 preplot files are identified by a specific record type, but not always the same one.
+func MostCommonPrefix(text string) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+
+	prefixmap := make(map[string]int)
+	for _, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		if string(line[0]) == " " {
+			continue
+		}
+		if string(line[0]) == "H" {
+			continue
+		}
+		prefixmap[string(line[0])]++
+	}
+
+	maxCount := 0
+	var mostCommon string
+	for k, v := range prefixmap {
+		if v > maxCount {
+			maxCount = v
+			mostCommon = k
+		}
+	}
+	return mostCommon
+
 }

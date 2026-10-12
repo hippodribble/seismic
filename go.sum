@@ -40,6 +40,8 @@ github.com/hack-pad/safejs v0.1.0 h1:qPS6vjreAqh2amUqj4WNG1zIw7qlRQJ9K10eDKMCnE8
 github.com/hack-pad/safejs v0.1.0/go.mod h1:HdS+bKF1NrE72VoXZeWzxFOVQVUSqZJAG0xNCnb+Tio=
 github.com/hippodribble/drawing v0.1.0 h1:wOl8yEk23JW0mQLGj3Od77U4UE+TvERFGftESkInodo=
 github.com/hippodribble/drawing v0.1.0/go.mod h1:aYGqgPb1SUnolcCjIO6xIDt+pNRMaccIddFlAfSFi8c=
+github.com/hippodribble/drawing v0.1.7 h1:EIP26uO9WFeXQIZISrjujzJUlQYCAVLO0UVzo/LJmjM=
+github.com/hippodribble/drawing v0.1.7/go.mod h1:2hGToSfO+Kg00t8EVLYIIM8BVG2ZsOd3WAyW2T9p92g=
 github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade h1:FmusiCI1wHw+XQbvL9M+1r/C3SPqKrmBaIOYwVfQoDE=
 github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade/go.mod h1:ZDXo8KHryOWSIqnsb/CiDq7hQUYryCgdVnxbj8tDG7o=
 github.com/jonas-p/go-shp v0.1.1 h1:LY81nN67DBCz6VNFn2kS64CjmnDo9IP8rmSkTvhO9jE=

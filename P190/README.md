@@ -1,120 +1,116 @@
-# P190 Parser and Shapefile Export
+# P190 preplot parser and utilities
 
-This repository includes a Go package in [p190.go](p190.go) that reads P1/90 style text data, groups records into preplot lines, and can export those lines to an ESRI polyline shapefile.
+This package parses P1/90-style preplot text files, groups records into named line features, and can export them as ESRI polyline shapefiles.
 
-## What [p190.go](p190.go) provides
+The current code in this folder includes:
 
-The package name is P190 and it defines three main types:
+- the reusable Go library in [p190.go](p190.go)
+- a Fyne-based viewer in [x/P190preplotviewer](x/P190preplotviewer)
+- a command-line shapefile exporter in [x/P190preplot2shape](x/P190preplot2shape)
 
-1. NodeRecord
-2. PreplotLine
-3. P190File
+## Package overview
 
-### NodeRecord
+The library is in the `P190` package and exposes these main types:
 
-NodeRecord is a parsed point record with:
+- `NodeRecord`: a single parsed node record
+- `PreplotLine`: a named collection of ordered nodes
+- `P190File`: the file-level parser and export container
 
-1. Record metadata (Type, LineName, IDs)
-2. Point number (Point)
-3. Coordinates (Easting, Northing)
+## Parsing behavior
 
-The method FromP190Text parses a fixed-width P190 text row and fills the struct.
+`NodeRecord.FromP190Text` reads fixed-width P190 fields and fills the struct with:
 
-Expected fixed-width slices used by parser:
+- record type
+- line name
+- point number
+- easting
+- northing
 
-1. Record type: character 1
-2. Line name: characters 2-13
-3. Point number: characters 20-25
-4. Easting: characters 47-55
-5. Northing: characters 56-64
+The parser expects the standard fixed-width layout used by the source files, primarily:
 
-If numeric fields cannot be parsed, parsing stops with a fatal log.
+- record type at column 1
+- line name in columns 2-13
+- point number in columns 20-25
+- easting in columns 47-55
+- northing in columns 56-64
 
-### PreplotLine
+`P190File.Load()` opens the file, filters on the selected record prefix, parses matching rows, and groups sequential records by line name into `PreplotLine` entries.
 
-PreplotLine represents one line (track) and its ordered point records.
+## Record-type detection
 
-Fields:
+The viewer uses `P190.MostCommonPrefix(text)` to detect the most common record code in a file and pass that into `NewP190File(...)`.
 
-1. Name string
-2. Records *[]NodeRecord
+Typical record prefixes include:
 
-Constructor:
+- `S`
+- `G`
+- `Q`
+- `A`
+- `T`
+- `V`
+- `E`
+- `Z`
+- `C`
 
-1. NewPreplotLine(name string) PreplotLine
-
-### P190File
-
-P190File is the main container for file import and export.
-
-Fields:
-
-1. Name string: input file path
-2. preplotrectype string: one-character record prefix to keep (for example S or P)
-3. Lines []PreplotLine: parsed output grouped by line name
-
-Constructor:
-
-1. NewP190File(name, preplotrectype string) P190File
-
-Methods:
-
-1. Load()
-2. ToShapeFile(filename string)
-
-## Load flow
-
-Load does the following:
-
-1. Opens Name and scans line-by-line
-2. Keeps only rows that start with preplotrectype
-3. Parses each selected row into NodeRecord
-4. Groups consecutive records by LineName into PreplotLine entries
-5. Stores result in P190File.Lines
-
-Important behavior:
-
-1. Grouping is based on consecutive line name changes, not global regrouping.
-2. Invalid files or parse failures currently terminate via log.Fatalln.
+This is useful because P190 preplot files often contain more than one record family, but one type usually dominates the actual line data.
 
 ## Shapefile export
 
-ToShapeFile writes one polyline geometry per PreplotLine using github.com/jonas-p/go-shp.
+`P190File.ToShapeFile(filename)` writes a polyline shapefile for each line using `github.com/jonas-p/go-shp`.
 
-Outputs created:
+Each line becomes a single polyline, and the output includes a `LINE` attribute containing the line name. The method writes a `.shp` and renames the generated DBF output to match the target filename.
 
-1. filename.shp
-2. filename.dbf
-3. Other companion shapefile parts created by the library
-
-Each written feature includes a LINE text attribute containing the source line name.
-
-## Minimal usage
+## Example usage
 
 ```go
 package main
 
-import "github.com/hippodribble/seismic/P190"
+import (
+    "fmt"
+    "github.com/hippodribble/seismic/P190"
+)
 
 func main() {
-	p := P190.NewP190File("survey.p190", "S")
-	p.Load()
-	p.ToShapeFile("survey_lines")
+    p := P190.NewP190File("survey.p190", "S")
+    if err := p.Load(); err != nil {
+        panic(err)
+    }
+
+    if err := p.ToShapeFile("survey_lines"); err != nil {
+        panic(err)
+    }
+
+    fmt.Printf("Loaded %d lines\n", len(p.Lines))
 }
 ```
 
-## How GUI code uses it
+## GUI viewer
 
-In [cmd/dialog.go](cmd/dialog.go), the application:
+The Fyne viewer in [x/P190preplotviewer/main.go](x/P190preplotviewer/main.go) lets you:
 
-1. Loads file text
-2. Detects the most common one-character record prefix
-3. Calls NewP190File(path, prefix)
-4. Calls Load()
-5. Converts loaded points into drawable lines for the viewport
+- open a `.p190`, `.p90`, or `.90` file
+- detect the dominant record prefix automatically
+- load the preplot lines into a viewport
+- inspect the raw file text
+- switch between standard and measurement/identify modes
+
+This is intended for quick visual checking of line geometry before exporting or further processing.
+
+## Command-line converter
+
+The converter in [x/P190preplot2shape/main.go](x/P190preplot2shape/main.go) takes a file and writes a shapefile from it.
+
+Example:
+
+```bash
+go run ./P190/x/P190preplot2shape -r S survey.p190
+```
+
+The `-r` flag selects the record type to parse; the final argument is the input file path.
 
 ## Notes and limitations
 
-1. Parsing assumes fixed-width input and minimum row length.
-2. Coordinate parsing assumes Easting/Northing are in the expected positions.
-3. Error handling is currently process-terminating; callers do not receive recoverable errors.
+- The parser assumes fixed-width input and validates the expected numeric ranges.
+- It groups consecutive records by line name, not by a separate global line index.
+- Errors are returned to the caller instead of terminating the process, which is the current library behavior in the code in this folder.
+- The helper tools are focused on reading and visualizing survey preplot geometry rather than full survey-data handling.
