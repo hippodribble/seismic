@@ -79,9 +79,9 @@ var (
 	displayedEntries          []segy.TraceIndexEntry
 	lastHoveredTraceIndex     int
 	lastHoveredSampleIndex    int
-	hasLastHoverPosition bool
-	lastHoverXFraction float32
-	lastHoverYFraction float32
+	hasLastHoverPosition      bool
+	lastHoverXFraction        float32
+	lastHoverYFraction        float32
 	displayedStartSampleIndex int
 	displayedSampleCount      int
 	fieldLabels               []string
