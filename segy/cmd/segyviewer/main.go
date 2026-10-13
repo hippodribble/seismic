@@ -9,6 +9,7 @@ import (
 	"image/color"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -32,25 +33,28 @@ const (
 	prefPrimaryMode      = "popup.primary.mode"
 	prefPrimaryMin       = "popup.primary.min"
 	prefPrimaryMax       = "popup.primary.max"
+	prefPrimaryStep      = "popup.primary.step"
 	prefSecondaryEnabled = "popup.secondary.enabled"
 	prefSecondaryField   = "popup.secondary.field"
 	prefSecondaryMode    = "popup.secondary.mode"
 	prefSecondaryMin     = "popup.secondary.min"
 	prefSecondaryMax     = "popup.secondary.max"
+	prefSecondaryStep    = "popup.secondary.step"
 
 	prefSortField1 = "popup.sort.field1"
 	prefSortOrder1 = "popup.sort.order1"
 	prefSortField2 = "popup.sort.field2"
 	prefSortOrder2 = "popup.sort.order2"
 
-	prefPalette      = "popup.render.palette"
-	prefClip         = "popup.render.clip"
-	prefNegClip      = "popup.render.negclip"
-	prefPosClip      = "popup.render.posclip"
-	prefTimeStartMs  = "popup.render.time_start_ms"
-	prefTimeEndMs    = "popup.render.time_end_ms"
-	prefZeroCentered = "popup.render.zero_centered"
-	prefMaxSamples   = "popup.render.max_samples"
+	prefPalette              = "popup.render.palette"
+	prefClip                 = "popup.render.clip"
+	prefNegClip              = "popup.render.negclip"
+	prefPosClip              = "popup.render.posclip"
+	prefTimeStartMs          = "popup.render.time_start_ms"
+	prefTimeEndMs            = "popup.render.time_end_ms"
+	prefZeroCentered         = "popup.render.zero_centered"
+	prefMaxSamples           = "popup.render.max_samples"
+	prefExportIncludeHeaders = "popup.export.include_file_headers"
 
 	prefGainMode      = "popup.gain.mode"
 	prefTSquaredScale = "popup.gain.tsquared_scale"
@@ -67,6 +71,7 @@ var (
 	centre                    *fyne.Container
 	statusLabel               *widget.Label
 	renderButton              *widget.Button
+	exportButton              *widget.Button
 	textHeaderButton          *widget.Button
 	reelHeaderButton          *widget.Button
 	traceInspectCheck         *widget.Check
@@ -76,6 +81,7 @@ var (
 	loadedFile                *segy.File
 	loadedCatalog             *segy.TraceCatalog
 	loadedSummary             segy.TraceHeaderRangeSummary
+	loadedTraceOnly           bool
 	displayedEntries          []segy.TraceIndexEntry
 	lastHoveredTraceIndex     int
 	lastHoveredSampleIndex    int
@@ -92,31 +98,35 @@ var (
 	primaryModeSelect    *widget.Select
 	primaryMinEntry      *widget.Entry
 	primaryMaxEntry      *widget.Entry
+	primaryStepEntry     *widget.Entry
 	secondaryEnableCheck *widget.Check
 	secondaryFieldSelect *widget.Select
 	secondaryModeSelect  *widget.Select
 	secondaryMinEntry    *widget.Entry
 	secondaryMaxEntry    *widget.Entry
+	secondaryStepEntry   *widget.Entry
 
 	sortField1Select *widget.Select
 	sortOrder1Select *widget.Select
 	sortField2Select *widget.Select
 	sortOrder2Select *widget.Select
 
-	paletteSelect      *widget.Select
-	zeroCenteredCheck  *widget.Check
-	clipEntry          *widget.Entry
-	negClipEntry       *widget.Entry
-	posClipEntry       *widget.Entry
-	timeStartEntry     *widget.Entry
-	timeEndEntry       *widget.Entry
-	maxSamplesEntry    *widget.Entry
-	gainModeSelect     *widget.Select
-	tSquaredScaleEntry *widget.Entry
-	agcWindowEntry     *widget.Entry
-	agcFloorEntry      *widget.Entry
-	gainTSquaredCard   *widget.Card
-	gainAGCCard        *widget.Card
+	paletteSelect             *widget.Select
+	zeroCenteredCheck         *widget.Check
+	clipEntry                 *widget.Entry
+	negClipEntry              *widget.Entry
+	posClipEntry              *widget.Entry
+	timeStartEntry            *widget.Entry
+	timeEndEntry              *widget.Entry
+	maxSamplesEntry           *widget.Entry
+	gainModeSelect            *widget.Select
+	tSquaredScaleEntry        *widget.Entry
+	agcWindowEntry            *widget.Entry
+	agcFloorEntry             *widget.Entry
+	gainTSquaredCard          *widget.Card
+	gainAGCCard               *widget.Card
+	exportIncludeHeadersCheck *widget.Check
+	exportEstimateLabel       *widget.Label
 )
 
 func main() {
@@ -277,6 +287,7 @@ func initOptions() {
 	labelToField = map[string]segy.TraceHeaderField{
 		"EP":     segy.TraceHeaderFieldEP,
 		"TRACR":  segy.TraceHeaderFieldTRACR,
+		"TRACF":  segy.TraceHeaderFieldTRACF,
 		"TRACL":  segy.TraceHeaderFieldTRACL,
 		"FLDR":   segy.TraceHeaderFieldFLDR,
 		"CDP":    segy.TraceHeaderFieldCDP,
@@ -288,7 +299,7 @@ func initOptions() {
 		"GY":     segy.TraceHeaderFieldGY,
 	}
 
-	fieldLabels = []string{"EP", "TRACR", "TRACL", "FLDR", "CDP", "CDPT", "OFFSET", "SX", "SY", "GX", "GY"}
+	fieldLabels = []string{"EP", "TRACR", "TRACF", "TRACL", "FLDR", "CDP", "CDPT", "OFFSET", "SX", "SY", "GX", "GY"}
 	paletteOptions = []string{"Grayscale", "Grayscale (Inverted)", "Blue-White-Red", "Blue-White-Red (Inverted)"}
 }
 
@@ -305,6 +316,10 @@ func gui() fyne.CanvasObject {
 		showReelHeaderPopup()
 	})
 	reelHeaderButton.Disable()
+	exportButton = widget.NewButton("Export Selection", func() {
+		exportSelection()
+	})
+	exportButton.Disable()
 	traceInspectCheck = widget.NewCheck("Trace inspect", func(checked bool) {
 		updateTraceHeaderPanelVisibility(checked)
 	})
@@ -323,6 +338,8 @@ func gui() fyne.CanvasObject {
 	primaryModeSelect.SetSelected("Range")
 	primaryMinEntry = widget.NewEntry()
 	primaryMaxEntry = widget.NewEntry()
+	primaryStepEntry = widget.NewEntry()
+	primaryStepEntry.SetText("1")
 
 	secondaryEnableCheck = widget.NewCheck("Use secondary filter", nil)
 	secondaryEnableCheck.SetChecked(false)
@@ -336,6 +353,8 @@ func gui() fyne.CanvasObject {
 	secondaryModeSelect.SetSelected("Range")
 	secondaryMinEntry = widget.NewEntry()
 	secondaryMaxEntry = widget.NewEntry()
+	secondaryStepEntry = widget.NewEntry()
+	secondaryStepEntry.SetText("1")
 
 	sortChoices := append([]string{"(none)"}, fieldLabels...)
 	sortField1Select = widget.NewSelect(sortChoices, nil)
@@ -373,6 +392,9 @@ func gui() fyne.CanvasObject {
 	agcWindowEntry.SetText("101")
 	agcFloorEntry = widget.NewEntry()
 	agcFloorEntry.SetText("1e-6")
+	exportIncludeHeadersCheck = widget.NewCheck("Include textual/reel headers in export", nil)
+	exportIncludeHeadersCheck.SetChecked(true)
+	exportEstimateLabel = widget.NewLabel("Expected export traces: n/a")
 
 	gainTSquaredCard = widget.NewCard("T-Squared Gain", "", widget.NewForm(
 		widget.NewFormItem("Scale", tSquaredScaleEntry),
@@ -399,6 +421,7 @@ func gui() fyne.CanvasObject {
 				widget.NewFormItem("Mode", primaryModeSelect),
 				widget.NewFormItem("Min / Value", primaryMinEntry),
 				widget.NewFormItem("Max", primaryMaxEntry),
+				widget.NewFormItem("Step", primaryStepEntry),
 			),
 		)),
 		widget.NewCard("Secondary filter", "", container.NewVBox(
@@ -408,6 +431,7 @@ func gui() fyne.CanvasObject {
 				widget.NewFormItem("Mode", secondaryModeSelect),
 				widget.NewFormItem("Min / Value", secondaryMinEntry),
 				widget.NewFormItem("Max", secondaryMaxEntry),
+				widget.NewFormItem("Step", secondaryStepEntry),
 			),
 		)),
 	)
@@ -437,10 +461,25 @@ func gui() fyne.CanvasObject {
 		gainAGCCard,
 	))
 
+	exporting := widget.NewCard("Export", "", container.NewVBox(
+		exportIncludeHeadersCheck,
+		exportEstimateLabel,
+		container.NewHBox(
+			widget.NewButton("Preview Export Count", func() {
+				refreshExportEstimate()
+			}),
+			layout.NewSpacer(),
+			widget.NewButton("Export Selection", func() {
+				exportSelection()
+			}),
+		),
+	))
+
 	controlsPanel := container.NewVBox(
 		widget.NewCard("Primary/Secondary Filters", "", filters),
 		sorting,
 		rendering,
+		exporting,
 		container.NewHBox(layout.NewSpacer(), renderButton),
 	)
 
@@ -458,6 +497,7 @@ func gui() fyne.CanvasObject {
 		loadButton,
 		textHeaderButton,
 		reelHeaderButton,
+		exportButton,
 		traceInspectCheck,
 		controlsButton,
 		widget.NewSeparator(),
@@ -529,8 +569,8 @@ func loader() {
 		}
 
 		filename := strings.ToLower(uri.Name())
-		if !strings.HasSuffix(filename, ".segy") && !strings.HasSuffix(filename, ".sgy") {
-			dialog.ShowError(errors.New("only .segy and .sgy files are supported"), winMain)
+		if !strings.HasSuffix(filename, ".segy") && !strings.HasSuffix(filename, ".sgy") && !strings.HasSuffix(filename, ".su") {
+			dialog.ShowError(errors.New("only .segy, .sgy and .su files are supported"), winMain)
 			return
 		}
 
@@ -541,8 +581,8 @@ func loader() {
 		}
 	}, winMain)
 
-	fileDialog.SetTitleText("Open SEG-Y file")
-	fileDialog.SetFilter(storage.NewExtensionFileFilter([]string{".segy", ".sgy"}))
+	fileDialog.SetTitleText("Open SEG-Y/SU file")
+	fileDialog.SetFilter(storage.NewExtensionFileFilter([]string{".segy", ".sgy", ".su"}))
 	fileDialog.Show()
 }
 
@@ -551,12 +591,29 @@ func loadSEGYFromURI(uri fyne.URI, resetRanges bool) error {
 		return fmt.Errorf("nil uri")
 	}
 
-	f, openErr := segy.Open(uri)
-	if openErr != nil {
-		return openErr
-	}
+	name := strings.ToLower(uri.Name())
+	traceOnly := strings.HasSuffix(name, ".su")
 
-	catalog, catalogErr := f.BuildTraceCatalog()
+	var (
+		f          *segy.File
+		openErr    error
+		catalog    *segy.TraceCatalog
+		catalogErr error
+	)
+
+	if traceOnly {
+		f, openErr = segy.OpenSU(uri)
+		if openErr != nil {
+			return openErr
+		}
+		catalog, catalogErr = f.BuildTraceCatalogTraceOnly()
+	} else {
+		f, openErr = segy.Open(uri)
+		if openErr != nil {
+			return openErr
+		}
+		catalog, catalogErr = f.BuildTraceCatalog()
+	}
 	if catalogErr != nil {
 		return catalogErr
 	}
@@ -564,9 +621,16 @@ func loadSEGYFromURI(uri fyne.URI, resetRanges bool) error {
 	loadedFile = f
 	loadedCatalog = catalog
 	loadedSummary = catalog.HeaderRangeSummary()
+	loadedTraceOnly = traceOnly
 	renderButton.Enable()
-	textHeaderButton.Enable()
-	reelHeaderButton.Enable()
+	exportButton.Enable()
+	if loadedTraceOnly {
+		textHeaderButton.Disable()
+		reelHeaderButton.Disable()
+	} else {
+		textHeaderButton.Enable()
+		reelHeaderButton.Enable()
+	}
 
 	if resetRanges {
 		applyFieldRangeDefaults(primaryFieldSelect.Selected, primaryMinEntry, primaryMaxEntry)
@@ -595,7 +659,11 @@ func loadSEGYFromURI(uri fyne.URI, resetRanges bool) error {
 	}
 
 	count := len(catalog.Entries)
-	statusLabel.SetText(fmt.Sprintf("Loaded %s: %d traces cataloged", uri.Name(), count))
+	if loadedTraceOnly {
+		statusLabel.SetText(fmt.Sprintf("Loaded %s (SU trace-only): %d traces cataloged", uri.Name(), count))
+	} else {
+		statusLabel.SetText(fmt.Sprintf("Loaded %s: %d traces cataloged", uri.Name(), count))
+	}
 	fmt.Println(loadedSummary)
 
 	if p := prefs(); p != nil {
@@ -649,19 +717,7 @@ func renderSelection() {
 		return
 	}
 
-	predicates, err := buildPredicates()
-	if err != nil {
-		dialog.ShowError(err, winMain)
-		return
-	}
-
-	sortKeys, err := buildSortKeys()
-	if err != nil {
-		dialog.ShowError(err, winMain)
-		return
-	}
-
-	entries, err := loadedCatalog.FindWhereSorted(predicates, sortKeys...)
+	entries, err := buildSelectedEntries()
 	if err != nil {
 		dialog.ShowError(err, winMain)
 		return
@@ -765,6 +821,119 @@ func renderSelection() {
 	if p := prefs(); p != nil {
 		p.SetBool(prefHasRenderableState, true)
 	}
+}
+
+func buildSelectedEntries() ([]segy.TraceIndexEntry, error) {
+	predicates, err := buildPredicates()
+	if err != nil {
+		return nil, err
+	}
+
+	sortKeys, err := buildSortKeys()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := loadedCatalog.FindWhereSorted(predicates, sortKeys...)
+	if err != nil {
+		return nil, err
+	}
+
+	stepSpecs, err := buildFilterStepSpecs()
+	if err != nil {
+		return nil, err
+	}
+
+	return applyFilterSteps(entries, stepSpecs), nil
+}
+
+func refreshExportEstimate() {
+	if exportEstimateLabel == nil {
+		return
+	}
+	if loadedFile == nil || loadedCatalog == nil {
+		exportEstimateLabel.SetText("Expected export traces: n/a (no SEG-Y loaded)")
+		return
+	}
+
+	entries, err := buildSelectedEntries()
+	if err != nil {
+		exportEstimateLabel.SetText(fmt.Sprintf("Expected export traces: error (%v)", err))
+		return
+	}
+
+	exportEstimateLabel.SetText(fmt.Sprintf("Expected export traces: %d", len(entries)))
+}
+
+func exportSelection() {
+	if loadedFile == nil || loadedCatalog == nil {
+		dialog.ShowInformation("No SEG-Y loaded", "Load a SEG-Y file first.", winMain)
+		return
+	}
+
+	entries, err := buildSelectedEntries()
+	if err != nil {
+		dialog.ShowError(err, winMain)
+		return
+	}
+	if exportEstimateLabel != nil {
+		exportEstimateLabel.SetText(fmt.Sprintf("Expected export traces: %d", len(entries)))
+	}
+	if len(entries) == 0 {
+		dialog.ShowInformation("No traces", "The current filters returned no traces.", winMain)
+		return
+	}
+
+	includeHeaders := true
+	if exportIncludeHeadersCheck != nil {
+		includeHeaders = exportIncludeHeadersCheck.Checked
+	}
+
+	saveDialog := dialog.NewFileSave(func(writer fyne.URIWriteCloser, saveErr error) {
+		if saveErr != nil {
+			dialog.ShowError(saveErr, winMain)
+			return
+		}
+		if writer == nil {
+			return
+		}
+		defer writer.Close()
+
+		exported, exportErr := loadedFile.ExportTraces(writer, entries, segy.TraceExportOptions{IncludeFileHeaders: includeHeaders})
+		if exportErr != nil {
+			dialog.ShowError(exportErr, winMain)
+			return
+		}
+
+		uriText := ""
+		if writer.URI() != nil {
+			uriText = writer.URI().Name()
+		}
+		if uriText == "" {
+			uriText = "output"
+		}
+		statusLabel.SetText(fmt.Sprintf("Exported %d traces to %s", exported, uriText))
+	}, winMain)
+
+	defaultExt := ".segy"
+	if !includeHeaders {
+		defaultExt = ".su"
+	}
+	base := "selection"
+	if loadedFile.URI != nil {
+		name := loadedFile.URI.Name()
+		if ext := filepath.Ext(name); ext != "" {
+			name = strings.TrimSuffix(name, ext)
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			base = name
+		}
+	}
+	saveDialog.SetFileName(base + "_filtered_sorted" + defaultExt)
+	saveDialog.SetFilter(storage.NewExtensionFileFilter([]string{".segy", ".sgy", ".su"}))
+	saveDialog.SetTitleText("Export Filtered/Sorted Traces")
+	saveDialog.Show()
 }
 
 func parseTimeRangeEntries() (float64, float64, bool, error) {
@@ -958,6 +1127,8 @@ func traceHeaderFieldValueForDisplay(field segy.TraceHeaderField, h segy.TraceHe
 		return int64(h.EnergySourcePointNumber)
 	case segy.TraceHeaderFieldTRACR:
 		return int64(h.TraceSequenceFile)
+	case segy.TraceHeaderFieldTRACF:
+		return int64(h.TraceNumberWithinRecord)
 	case segy.TraceHeaderFieldTRACL:
 		return int64(h.TraceSequenceLine)
 	case segy.TraceHeaderFieldFLDR:
@@ -1242,6 +1413,79 @@ func buildPredicate(fieldSelect, modeSelect *widget.Select, minEntry, maxEntry *
 	return segy.RangePredicate(field, minValue, maxValue), nil
 }
 
+type filterStepSpec struct {
+	Field  segy.TraceHeaderField
+	Anchor int64
+	Step   int64
+}
+
+func buildFilterStepSpecs() ([]filterStepSpec, error) {
+	specs := make([]filterStepSpec, 0, 2)
+
+	primarySpec, err := buildFilterStepSpec("primary", primaryFieldSelect, primaryMinEntry, primaryStepEntry)
+	if err != nil {
+		return nil, err
+	}
+	if primarySpec.Step > 1 {
+		specs = append(specs, primarySpec)
+	}
+
+	if secondaryEnableCheck.Checked {
+		secondarySpec, err := buildFilterStepSpec("secondary", secondaryFieldSelect, secondaryMinEntry, secondaryStepEntry)
+		if err != nil {
+			return nil, err
+		}
+		if secondarySpec.Step > 1 {
+			specs = append(specs, secondarySpec)
+		}
+	}
+
+	return specs, nil
+}
+
+func buildFilterStepSpec(prefix string, fieldSelect *widget.Select, minEntry, stepEntry *widget.Entry) (filterStepSpec, error) {
+	field, ok := labelToField[fieldSelect.Selected]
+	if !ok {
+		return filterStepSpec{}, fmt.Errorf("%s filter: invalid field selection", prefix)
+	}
+
+	anchor, err := parseInt64Entry(prefix+" min/value", minEntry)
+	if err != nil {
+		return filterStepSpec{}, err
+	}
+
+	step, err := parsePositiveInt64Entry(prefix+" step", stepEntry)
+	if err != nil {
+		return filterStepSpec{}, err
+	}
+
+	return filterStepSpec{Field: field, Anchor: anchor, Step: step}, nil
+}
+
+func applyFilterSteps(entries []segy.TraceIndexEntry, specs []filterStepSpec) []segy.TraceIndexEntry {
+	if len(entries) == 0 || len(specs) == 0 {
+		return entries
+	}
+
+	filtered := make([]segy.TraceIndexEntry, 0, len(entries))
+	for _, entry := range entries {
+		include := true
+		for _, spec := range specs {
+			value := traceHeaderFieldValueForDisplay(spec.Field, entry.Header)
+			delta := value - spec.Anchor
+			if delta < 0 || delta%spec.Step != 0 {
+				include = false
+				break
+			}
+		}
+		if include {
+			filtered = append(filtered, entry)
+		}
+	}
+
+	return filtered
+}
+
 func buildSortKeys() ([]segy.TraceSortKey, error) {
 	keys := make([]segy.TraceSortKey, 0, 2)
 
@@ -1292,6 +1536,17 @@ func parseInt64Entry(name string, e *widget.Entry) (int64, error) {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s: %q", name, v)
+	}
+	return n, nil
+}
+
+func parsePositiveInt64Entry(name string, e *widget.Entry) (int64, error) {
+	n, err := parseInt64Entry(name, e)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("%s must be > 0", name)
 	}
 	return n, nil
 }
@@ -1440,12 +1695,14 @@ func applyPersistedPopupSettings() {
 	setSelectFromPref(primaryModeSelect, p.StringWithFallback(prefPrimaryMode, "Range"))
 	primaryMinEntry.SetText(p.StringWithFallback(prefPrimaryMin, ""))
 	primaryMaxEntry.SetText(p.StringWithFallback(prefPrimaryMax, ""))
+	primaryStepEntry.SetText(p.StringWithFallback(prefPrimaryStep, "1"))
 
 	secondaryEnableCheck.SetChecked(p.BoolWithFallback(prefSecondaryEnabled, false))
 	setSelectFromPref(secondaryFieldSelect, p.StringWithFallback(prefSecondaryField, "OFFSET"))
 	setSelectFromPref(secondaryModeSelect, p.StringWithFallback(prefSecondaryMode, "Range"))
 	secondaryMinEntry.SetText(p.StringWithFallback(prefSecondaryMin, ""))
 	secondaryMaxEntry.SetText(p.StringWithFallback(prefSecondaryMax, ""))
+	secondaryStepEntry.SetText(p.StringWithFallback(prefSecondaryStep, "1"))
 
 	setSelectFromPref(sortField1Select, p.StringWithFallback(prefSortField1, "EP"))
 	setSelectFromPref(sortOrder1Select, p.StringWithFallback(prefSortOrder1, "Asc"))
@@ -1460,6 +1717,7 @@ func applyPersistedPopupSettings() {
 	timeEndEntry.SetText(p.StringWithFallback(prefTimeEndMs, ""))
 	maxSamplesEntry.SetText(p.StringWithFallback(prefMaxSamples, strconv.FormatInt(segy.DefaultMaxImageSamples, 10)))
 	zeroCenteredCheck.SetChecked(p.BoolWithFallback(prefZeroCentered, true))
+	exportIncludeHeadersCheck.SetChecked(p.BoolWithFallback(prefExportIncludeHeaders, true))
 
 	setSelectFromPref(gainModeSelect, p.StringWithFallback(prefGainMode, "None"))
 	tSquaredScaleEntry.SetText(p.StringWithFallback(prefTSquaredScale, "1.0"))
@@ -1483,6 +1741,7 @@ func attachPopupSettingsPersistence() {
 	primaryModeSelect.OnChanged = func(v string) { p.SetString(prefPrimaryMode, v) }
 	primaryMinEntry.OnChanged = func(v string) { p.SetString(prefPrimaryMin, v) }
 	primaryMaxEntry.OnChanged = func(v string) { p.SetString(prefPrimaryMax, v) }
+	primaryStepEntry.OnChanged = func(v string) { p.SetString(prefPrimaryStep, v) }
 
 	secondaryEnableCheck.OnChanged = func(v bool) { p.SetBool(prefSecondaryEnabled, v) }
 	secondaryFieldSelect.OnChanged = func(label string) {
@@ -1495,6 +1754,7 @@ func attachPopupSettingsPersistence() {
 	secondaryModeSelect.OnChanged = func(v string) { p.SetString(prefSecondaryMode, v) }
 	secondaryMinEntry.OnChanged = func(v string) { p.SetString(prefSecondaryMin, v) }
 	secondaryMaxEntry.OnChanged = func(v string) { p.SetString(prefSecondaryMax, v) }
+	secondaryStepEntry.OnChanged = func(v string) { p.SetString(prefSecondaryStep, v) }
 
 	sortField1Select.OnChanged = func(v string) { p.SetString(prefSortField1, v) }
 	sortOrder1Select.OnChanged = func(v string) { p.SetString(prefSortOrder1, v) }
@@ -1509,6 +1769,7 @@ func attachPopupSettingsPersistence() {
 	timeEndEntry.OnChanged = func(v string) { p.SetString(prefTimeEndMs, v) }
 	maxSamplesEntry.OnChanged = func(v string) { p.SetString(prefMaxSamples, v) }
 	zeroCenteredCheck.OnChanged = func(v bool) { p.SetBool(prefZeroCentered, v) }
+	exportIncludeHeadersCheck.OnChanged = func(v bool) { p.SetBool(prefExportIncludeHeaders, v) }
 
 	gainModeSelect.OnChanged = func(v string) {
 		updateGainControlsState()
@@ -1523,8 +1784,10 @@ func attachEnterToRenderHandlers() {
 	entries := []*widget.Entry{
 		primaryMinEntry,
 		primaryMaxEntry,
+		primaryStepEntry,
 		secondaryMinEntry,
 		secondaryMaxEntry,
+		secondaryStepEntry,
 		clipEntry,
 		negClipEntry,
 		posClipEntry,

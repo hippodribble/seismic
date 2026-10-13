@@ -2,7 +2,7 @@
 
 The segy package provides core types and helpers for working with industry-standard SEG-Y files.
 
-Note: an example SEG-Y viewer application is available in [x/main.go](x/main.go).
+Note: an example SEG-Y viewer application is available in [cmd/segyviewer/main.go](cmd/segyviewer/main.go).
 
 It includes:
 

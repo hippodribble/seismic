@@ -24,6 +24,8 @@ const (
 	TraceHeaderByteLength = 240
 	// DefaultMaxImageSamples is a conservative safety limit for ensemble image creation.
 	DefaultMaxImageSamples int64 = 100_000_000
+	// DefaultSUDataSampleFormatCode is the conventional Seismic Unix trace sample format (IEEE float32).
+	DefaultSUDataSampleFormatCode uint16 = 5
 )
 
 // TextualHeaderEncoding identifies the character encoding used by a textual header.
@@ -181,6 +183,7 @@ type TraceHeaderField string
 const (
 	TraceHeaderFieldEP     TraceHeaderField = "ep"
 	TraceHeaderFieldTRACR  TraceHeaderField = "tracr"
+	TraceHeaderFieldTRACF  TraceHeaderField = "tracf"
 	TraceHeaderFieldTRACL  TraceHeaderField = "tracl"
 	TraceHeaderFieldFLDR   TraceHeaderField = "fldr"
 	TraceHeaderFieldCDP    TraceHeaderField = "cdp"
@@ -318,6 +321,13 @@ type EnsembleImageStats struct {
 	Height    int
 }
 
+// TraceExportOptions controls how selected traces are serialized to output.
+type TraceExportOptions struct {
+	// IncludeFileHeaders controls whether textual + binary (+ extended textual) headers are written.
+	// When false, output contains trace headers and trace payloads only (SU-compatible layout).
+	IncludeFileHeaders bool
+}
+
 // TooManySamplesError indicates that an ensemble exceeds the configured threshold.
 type TooManySamplesError struct {
 	Requested int64
@@ -406,6 +416,65 @@ func OpenWithByteOrder(uri fyne.URI, byteOrder binary.ByteOrder) (*File, error) 
 	defer r.Close()
 
 	return ReadHeadersWithByteOrder(uri, r, byteOrder)
+}
+
+// OpenSU reads a trace-only Seismic Unix file (no textual/binary SEG-Y headers).
+// It assumes big-endian IEEE float32 trace payloads.
+func OpenSU(uri fyne.URI) (*File, error) {
+	return OpenSUWithByteOrder(uri, binary.BigEndian)
+}
+
+// OpenSUWithByteOrder reads a trace-only Seismic Unix file with explicit byte order.
+// It assumes IEEE float32 trace payloads.
+func OpenSUWithByteOrder(uri fyne.URI, byteOrder binary.ByteOrder) (*File, error) {
+	return OpenSUWithByteOrderAndFormat(uri, byteOrder, DefaultSUDataSampleFormatCode)
+}
+
+// OpenSUWithByteOrderAndFormat reads a trace-only Seismic Unix file with explicit byte order and sample format code.
+func OpenSUWithByteOrderAndFormat(uri fyne.URI, byteOrder binary.ByteOrder, sampleFormatCode uint16) (*File, error) {
+	if uri == nil {
+		return nil, fmt.Errorf("nil uri")
+	}
+	if byteOrder == nil {
+		return nil, fmt.Errorf("nil byte order")
+	}
+	if _, err := sampleByteLength(sampleFormatCode); err != nil {
+		return nil, fmt.Errorf("invalid SU sample format code %d: %w", sampleFormatCode, err)
+	}
+
+	r, err := storage.Reader(uri)
+	if err != nil {
+		return nil, fmt.Errorf("open su uri: %w", err)
+	}
+	defer r.Close()
+
+	th, err := ReadTraceHeaderWithByteOrder(r, byteOrder)
+	if err != nil {
+		return nil, fmt.Errorf("read first su trace header: %w", err)
+	}
+
+	sampleCount := th.SamplesInTrace
+	if sampleCount == 0 {
+		return nil, fmt.Errorf("first su trace has zero SamplesInTrace; cannot infer trace payload length")
+	}
+
+	segyFile := &File{URI: uri, ByteOrder: byteOrder}
+	segyFile.BinaryHeader.SampleIntervalMicrosec = th.SampleIntervalMicrosec
+	segyFile.BinaryHeader.SampleIntervalOriginal = th.SampleIntervalMicrosec
+	segyFile.BinaryHeader.SamplesPerTrace = sampleCount
+	segyFile.BinaryHeader.SamplesPerTraceOriginal = sampleCount
+	segyFile.BinaryHeader.DataSampleFormatCode = sampleFormatCode
+	segyFile.BinaryHeader.FixedLengthTraceFlag = 1
+
+	// Populate raw binary header bytes for callers that choose to export with file headers.
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[16:18], segyFile.BinaryHeader.SampleIntervalMicrosec)
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[18:20], segyFile.BinaryHeader.SampleIntervalOriginal)
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[20:22], segyFile.BinaryHeader.SamplesPerTrace)
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[22:24], segyFile.BinaryHeader.SamplesPerTraceOriginal)
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[24:26], segyFile.BinaryHeader.DataSampleFormatCode)
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[302:304], segyFile.BinaryHeader.FixedLengthTraceFlag)
+
+	return segyFile, nil
 }
 
 // ReadHeaders parses textual and binary headers from an io.Reader.
@@ -656,6 +725,41 @@ func (f *File) BuildTraceCatalog() (*TraceCatalog, error) {
 	return catalog, nil
 }
 
+// BuildTraceCatalogTraceOnly scans a trace-only file layout (SU style, no textual/binary headers).
+func (f *File) BuildTraceCatalogTraceOnly() (*TraceCatalog, error) {
+	if f == nil {
+		return nil, fmt.Errorf("nil segy file")
+	}
+	if f.URI == nil {
+		return nil, fmt.Errorf("nil uri")
+	}
+
+	r, err := storage.Reader(f.URI)
+	if err != nil {
+		return nil, fmt.Errorf("open su uri: %w", err)
+	}
+	defer r.Close()
+
+	byteOrder := f.ByteOrder
+	if byteOrder == nil {
+		byteOrder = binary.BigEndian
+	}
+
+	catalog, err := BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(
+		f.URI,
+		r,
+		byteOrder,
+		f.BinaryHeader.DataSampleFormatCode,
+		f.BinaryHeader.SamplesPerTrace,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	f.TraceCatalog = catalog
+	return catalog, nil
+}
+
 // BuildTraceCatalogFromReader scans trace headers and payload lengths from a SEG-Y stream.
 // The reader must be positioned at byte zero of the SEG-Y file.
 func BuildTraceCatalogFromReader(uri fyne.URI, r io.Reader) (*TraceCatalog, error) {
@@ -743,6 +847,88 @@ func BuildTraceCatalogFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrd
 	return catalog, nil
 }
 
+// BuildTraceCatalogTraceOnlyFromReader scans trace headers and payload lengths from a trace-only stream.
+// The reader must be positioned at byte zero where the first 240-byte trace header starts.
+func BuildTraceCatalogTraceOnlyFromReader(uri fyne.URI, r io.Reader, sampleFormatCode uint16, defaultSamplesPerTrace uint16) (*TraceCatalog, error) {
+	return BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(uri, r, binary.BigEndian, sampleFormatCode, defaultSamplesPerTrace)
+}
+
+// BuildTraceCatalogTraceOnlyFromReaderWithByteOrder scans trace headers/payload lengths from trace-only layout.
+func BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, defaultSamplesPerTrace uint16) (*TraceCatalog, error) {
+	if r == nil {
+		return nil, fmt.Errorf("nil reader")
+	}
+	if byteOrder == nil {
+		return nil, fmt.Errorf("nil byte order")
+	}
+
+	sampleByteLength, sizeErr := sampleByteLength(sampleFormatCode)
+	if sizeErr != nil {
+		return nil, fmt.Errorf("trace-only sample format code %d: %w", sampleFormatCode, sizeErr)
+	}
+
+	catalog := &TraceCatalog{
+		URI:           uri,
+		Entries:       []TraceIndexEntry{},
+		equalityIndex: make(map[TraceHeaderField]map[int64][]int),
+		sortedIndex:   make(map[TraceHeaderField][]traceFieldValue),
+	}
+
+	pos := int64(0)
+	traceNumber := 0
+	for {
+		traceHeaderBytes, readErr := readExact(r, TraceHeaderByteLength)
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr == io.ErrUnexpectedEOF {
+				return nil, fmt.Errorf("partial trace header at byte %d: %w", pos, readErr)
+			}
+			return nil, fmt.Errorf("read trace header at byte %d: %w", pos, readErr)
+		}
+
+		th := parseTraceHeader(traceHeaderBytes, byteOrder)
+		sampleCount := th.SamplesInTrace
+		if sampleCount == 0 {
+			sampleCount = defaultSamplesPerTrace
+		}
+		if sampleCount == 0 {
+			return nil, fmt.Errorf("trace %d at byte %d has zero sample count and no default", traceNumber+1, pos)
+		}
+
+		dataByteLength := int64(sampleCount) * int64(sampleByteLength)
+		if dataByteLength < 0 {
+			return nil, fmt.Errorf("trace %d at byte %d has invalid data length", traceNumber+1, pos)
+		}
+
+		entry := TraceIndexEntry{
+			TraceNumber:      traceNumber + 1,
+			HeaderOffset:     pos,
+			DataOffset:       pos + TraceHeaderByteLength,
+			DataByteLength:   dataByteLength,
+			SampleCount:      sampleCount,
+			SampleFormatCode: sampleFormatCode,
+			SampleByteLength: sampleByteLength,
+			Header:           th,
+		}
+		catalog.Entries = append(catalog.Entries, entry)
+
+		if dataByteLength > 0 {
+			_, skipErr := io.CopyN(io.Discard, r, dataByteLength)
+			if skipErr != nil {
+				return nil, fmt.Errorf("skip trace payload at byte %d: %w", entry.DataOffset, skipErr)
+			}
+		}
+
+		pos += TraceHeaderByteLength + dataByteLength
+		traceNumber++
+	}
+
+	catalog.buildIndexes()
+	return catalog, nil
+}
+
 // FindEqual returns all traces where the field exactly matches value.
 func (c *TraceCatalog) FindEqual(field TraceHeaderField, value int64) []TraceIndexEntry {
 	if c == nil {
@@ -807,6 +993,11 @@ func (c *TraceCatalog) FindEnsembleByEP(ep int64) []TraceIndexEntry {
 // FindByTRACR returns all traces matching a TRACR value (trace sequence in file/reel).
 func (c *TraceCatalog) FindByTRACR(tracr int64) []TraceIndexEntry {
 	return c.FindEqual(TraceHeaderFieldTRACR, tracr)
+}
+
+// FindByTRACF returns all traces matching a TRACF value (trace number within record).
+func (c *TraceCatalog) FindByTRACF(tracf int64) []TraceIndexEntry {
+	return c.FindEqual(TraceHeaderFieldTRACF, tracf)
 }
 
 // HeaderRangeSummary returns min/max values for each indexed header field.
@@ -1022,6 +1213,73 @@ func (f *File) ReadTraceAtOffset(headerOffset int64, sampleCount uint16) (TraceH
 	}
 
 	return th, traceData, nil
+}
+
+// ExportTraces writes selected traces to w in the provided order.
+// When options.IncludeFileHeaders is true, textual + binary + extended textual headers are written first.
+// Trace bytes are copied verbatim from source to preserve original trace headers and encoded sample payloads.
+func (f *File) ExportTraces(w io.Writer, entries []TraceIndexEntry, options TraceExportOptions) (int, error) {
+	if f == nil {
+		return 0, fmt.Errorf("nil segy file")
+	}
+	if f.URI == nil {
+		return 0, fmt.Errorf("nil uri")
+	}
+	if w == nil {
+		return 0, fmt.Errorf("nil writer")
+	}
+
+	if options.IncludeFileHeaders {
+		if _, err := w.Write(f.TextualHeader.Data[:]); err != nil {
+			return 0, fmt.Errorf("write textual header: %w", err)
+		}
+		if _, err := w.Write(f.BinaryHeader.Raw[:]); err != nil {
+			return 0, fmt.Errorf("write binary header: %w", err)
+		}
+		for i, h := range f.ExtendedTextualHeader {
+			if _, err := w.Write(h.Data[:]); err != nil {
+				return 0, fmt.Errorf("write extended textual header %d: %w", i+1, err)
+			}
+		}
+	}
+
+	r, err := storage.Reader(f.URI)
+	if err != nil {
+		return 0, fmt.Errorf("open segy uri: %w", err)
+	}
+	defer r.Close()
+
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return 0, fmt.Errorf("reader for uri does not support random access")
+	}
+
+	exported := 0
+	for i, entry := range entries {
+		if entry.HeaderOffset < 0 {
+			return exported, fmt.Errorf("entry %d has invalid header offset %d", i+1, entry.HeaderOffset)
+		}
+		if entry.DataByteLength < 0 {
+			return exported, fmt.Errorf("entry %d has invalid data length %d", i+1, entry.DataByteLength)
+		}
+
+		traceByteLength := int64(TraceHeaderByteLength) + entry.DataByteLength
+		if traceByteLength < int64(TraceHeaderByteLength) {
+			return exported, fmt.Errorf("entry %d has invalid combined trace length", i+1)
+		}
+
+		if _, err := seeker.Seek(entry.HeaderOffset, io.SeekStart); err != nil {
+			return exported, fmt.Errorf("seek to trace %d header: %w", i+1, err)
+		}
+
+		if _, err := io.CopyN(w, r, traceByteLength); err != nil {
+			return exported, fmt.Errorf("copy trace %d bytes: %w", i+1, err)
+		}
+
+		exported++
+	}
+
+	return exported, nil
 }
 
 // DecodeTraceSamples converts raw trace bytes into float32 values.
@@ -1645,6 +1903,7 @@ func indexedTraceHeaderFields() []TraceHeaderField {
 	return []TraceHeaderField{
 		TraceHeaderFieldEP,
 		TraceHeaderFieldTRACR,
+		TraceHeaderFieldTRACF,
 		TraceHeaderFieldTRACL,
 		TraceHeaderFieldFLDR,
 		TraceHeaderFieldCDP,
@@ -1663,6 +1922,8 @@ func traceHeaderFieldValue(field TraceHeaderField, th TraceHeader) int64 {
 		return int64(th.EnergySourcePointNumber)
 	case TraceHeaderFieldTRACR:
 		return int64(th.TraceSequenceFile)
+	case TraceHeaderFieldTRACF:
+		return int64(th.TraceNumberWithinRecord)
 	case TraceHeaderFieldTRACL:
 		return int64(th.TraceSequenceLine)
 	case TraceHeaderFieldFLDR:
