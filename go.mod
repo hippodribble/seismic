@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.8.1
 	github.com/hippodribble/drawing v0.1.7
 	github.com/jonas-p/go-shp v0.1.1
+	golang.org/x/text v0.43.0
 )
 
 require (
@@ -41,6 +42,5 @@ require (
 	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
