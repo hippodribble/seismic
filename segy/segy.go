@@ -273,6 +273,40 @@ type EnsembleImageOptions struct {
 	// When <= 0, PercentileClip is used.
 	NegativePercentileClip float64
 	PositivePercentileClip float64
+
+	// Gain applies optional time-variant gain before clipping and palette mapping.
+	Gain GainOptions
+}
+
+// GainMode identifies the gain transform applied before rendering.
+type GainMode uint8
+
+const (
+	GainModeNone GainMode = iota
+	GainModeTSquared
+	GainModeAGC
+)
+
+// GainOptions controls optional time-variant gain transforms.
+type GainOptions struct {
+	Mode GainMode
+
+	// TSquaredScale controls t-squared gain strength in gain = 1 + TSquaredScale*t^2.
+	// When <= 0, a scale of 1 is used.
+	TSquaredScale float64
+
+	// SampleIntervalSec is optional for t-squared gain.
+	// When > 0, time is computed as sampleIndex * SampleIntervalSec.
+	// When <= 0, sample index is used as the time axis.
+	SampleIntervalSec float64
+
+	// AGCWindowSamples is the AGC RMS window length in samples.
+	// When <= 0, a default window of 101 samples is used.
+	AGCWindowSamples int
+
+	// AGCFloor is the minimum RMS denominator to avoid unstable AGC scaling.
+	// When <= 0, a default floor of 1e-6 is used.
+	AGCFloor float64
 }
 
 // EnsembleImageStats reports scaling bounds used to create a palette image.
@@ -1186,6 +1220,7 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 	}
 
 	img := image.NewPaletted(image.Rect(0, 0, samples.TraceCount, samples.SamplesPerTrace), opts.Palette)
+	workingTraces := applyGain(samples.Traces, opts.Gain)
 
 	stats := EnsembleImageStats{
 		ZeroIndex: opts.ZeroIndex,
@@ -1203,7 +1238,7 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 			posClip = opts.PercentileClip
 		}
 
-		negatives, positives := splitSigns(samples.Traces)
+		negatives, positives := splitSigns(workingTraces)
 		lower := float32(0)
 		upper := float32(0)
 		if len(negatives) > 0 {
@@ -1217,7 +1252,7 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 		stats.UpperClip = upper
 
 		for x := 0; x < samples.TraceCount; x++ {
-			trace := samples.Traces[x]
+			trace := workingTraces[x]
 			for y := 0; y < samples.SamplesPerTrace; y++ {
 				v := trace[y]
 				idx := mapZeroCentered(v, lower, upper, opts.ZeroIndex)
@@ -1228,7 +1263,7 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 		return img, stats, nil
 	}
 
-	flat := flattenFinite(samples.Traces)
+	flat := flattenFinite(workingTraces)
 	if len(flat) == 0 {
 		return nil, EnsembleImageStats{}, fmt.Errorf("no finite sample values available for rendering")
 	}
@@ -1244,7 +1279,7 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 	stats.UpperClip = upper
 
 	for x := 0; x < samples.TraceCount; x++ {
-		trace := samples.Traces[x]
+		trace := workingTraces[x]
 		for y := 0; y < samples.SamplesPerTrace; y++ {
 			idx := mapLinear(trace[y], lower, upper)
 			img.SetColorIndex(x, y, idx)
@@ -1252,6 +1287,107 @@ func RenderEnsembleImage(samples EnsembleSamples, opts EnsembleImageOptions) (*i
 	}
 
 	return img, stats, nil
+}
+
+func applyGain(traces [][]float32, gain GainOptions) [][]float32 {
+	switch gain.Mode {
+	case GainModeTSquared:
+		return applyTSquaredGain(traces, gain)
+	case GainModeAGC:
+		return applyAGC(traces, gain)
+	default:
+		return traces
+	}
+}
+
+func applyTSquaredGain(traces [][]float32, gain GainOptions) [][]float32 {
+	out := cloneTraces(traces)
+	scale := gain.TSquaredScale
+	if scale <= 0 {
+		scale = 1
+	}
+	dt := gain.SampleIntervalSec
+
+	for i := range out {
+		trace := out[i]
+		for j := range trace {
+			t := float64(j)
+			if dt > 0 {
+				t *= dt
+			}
+			gainFactor := 1.0 + scale*t*t
+			trace[j] *= float32(gainFactor)
+		}
+	}
+
+	return out
+}
+
+func applyAGC(traces [][]float32, gain GainOptions) [][]float32 {
+	out := cloneTraces(traces)
+	window := gain.AGCWindowSamples
+	if window <= 0 {
+		window = 101
+	}
+	if window%2 == 0 {
+		window++
+	}
+	half := window / 2
+	floor := gain.AGCFloor
+	if floor <= 0 {
+		floor = 1e-6
+	}
+
+	for i := range out {
+		trace := out[i]
+		n := len(trace)
+		if n == 0 {
+			continue
+		}
+
+		prefix := make([]float64, n+1)
+		for j := 0; j < n; j++ {
+			v := float64(trace[j])
+			prefix[j+1] = prefix[j] + v*v
+		}
+
+		for j := 0; j < n; j++ {
+			start := j - half
+			if start < 0 {
+				start = 0
+			}
+			end := j + half + 1
+			if end > n {
+				end = n
+			}
+			count := end - start
+			if count <= 0 {
+				continue
+			}
+
+			sumSq := prefix[end] - prefix[start]
+			rms := math.Sqrt(sumSq / float64(count))
+			if rms < floor {
+				rms = floor
+			}
+			trace[j] = float32(float64(trace[j]) / rms)
+		}
+	}
+
+	return out
+}
+
+func cloneTraces(traces [][]float32) [][]float32 {
+	out := make([][]float32, len(traces))
+	for i := range traces {
+		if traces[i] == nil {
+			continue
+		}
+		copied := make([]float32, len(traces[i]))
+		copy(copied, traces[i])
+		out[i] = copied
+	}
+	return out
 }
 
 // RenderEnsembleFromEntries reads, decodes, and renders selected traces as a paletted image.

@@ -302,6 +302,10 @@ opts := segy.EnsembleImageOptions{
 	ZeroIndex:              127,
 	NegativePercentileClip: 2.0,
 	PositivePercentileClip: 2.0,
+	Gain: segy.GainOptions{
+		Mode:          segy.GainModeTSquared,
+		TSquaredScale: 1.0,
+	},
 }
 
 img, stats, err := segy.RenderEnsembleImage(ensemble, opts)
@@ -345,6 +349,19 @@ Notes:
 - `RenderEnsembleImage` requires a palette of exactly 256 colors.
 - In zero-centered mode, value `0` maps to `ZeroIndex` and negative/positive clips are applied independently.
 - In non-zero-centered mode, `PercentileClip` is applied symmetrically to lower and upper tails.
+- `Gain.Mode` is optional and defaults to `GainModeNone`.
+- `GainModeTSquared` applies gain $1 + scale \times t^2$ before clipping.
+- `GainModeAGC` applies windowed RMS normalization with `AGCWindowSamples` and `AGCFloor`.
+
+AGC example:
+
+```go
+opts.Gain = segy.GainOptions{
+	Mode:             segy.GainModeAGC,
+	AGCWindowSamples: 101,
+	AGCFloor:         1e-6,
+}
+```
 
 You can also query and sort in one call:
 
