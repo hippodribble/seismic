@@ -2,6 +2,8 @@
 
 The segy package provides core types and helpers for working with industry-standard SEG-Y files.
 
+Note: an example SEG-Y viewer application is available in [x/main.go](x/main.go).
+
 It includes:
 
 - File-level modeling with a platform-independent file location (`fyne.URI`)
