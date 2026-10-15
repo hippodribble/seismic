@@ -2,11 +2,13 @@ package segy
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -327,6 +329,24 @@ type TraceExportOptions struct {
 	// When false, output contains trace headers and trace payloads only (SU-compatible layout).
 	IncludeFileHeaders bool
 }
+
+// CatalogBuildProgress reports trace-catalog scan progress.
+type CatalogBuildProgress struct {
+	TraceCount     int
+	BytesProcessed int64
+	TotalBytes     int64
+	Done           bool
+	Canceled       bool
+}
+
+// CatalogBuildProgressFunc receives periodic progress updates while catalogs are built.
+type CatalogBuildProgressFunc func(CatalogBuildProgress)
+
+// CatalogBuildCancelFunc should return true when catalog creation should stop.
+type CatalogBuildCancelFunc func() bool
+
+// ErrCatalogBuildCanceled indicates a user-requested cancellation during catalog creation.
+var ErrCatalogBuildCanceled = errors.New("catalog build canceled")
 
 // TooManySamplesError indicates that an ensemble exceeds the configured threshold.
 type TooManySamplesError struct {
@@ -698,6 +718,18 @@ func parseTraceHeader(data []byte, byteOrder binary.ByteOrder) TraceHeader {
 
 // BuildTraceCatalog scans all traces and creates query indexes for header fields.
 func (f *File) BuildTraceCatalog() (*TraceCatalog, error) {
+	return f.BuildTraceCatalogWithProgress(nil)
+}
+
+// BuildTraceCatalogWithProgress scans all traces and creates query indexes for header fields.
+// Progress callbacks are optional and may be nil.
+func (f *File) BuildTraceCatalogWithProgress(progress CatalogBuildProgressFunc) (*TraceCatalog, error) {
+	return f.BuildTraceCatalogWithProgressAndCancel(progress, nil)
+}
+
+// BuildTraceCatalogWithProgressAndCancel scans all traces and creates query indexes for header fields.
+// Progress and cancel callbacks are optional and may be nil.
+func (f *File) BuildTraceCatalogWithProgressAndCancel(progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
 	if f == nil {
 		return nil, fmt.Errorf("nil segy file")
 	}
@@ -716,7 +748,7 @@ func (f *File) BuildTraceCatalog() (*TraceCatalog, error) {
 		byteOrder = binary.BigEndian
 	}
 
-	catalog, err := BuildTraceCatalogFromReaderWithByteOrder(f.URI, r, byteOrder)
+	catalog, err := BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(f.URI, r, byteOrder, progress, shouldCancel)
 	if err != nil {
 		return nil, err
 	}
@@ -727,6 +759,18 @@ func (f *File) BuildTraceCatalog() (*TraceCatalog, error) {
 
 // BuildTraceCatalogTraceOnly scans a trace-only file layout (SU style, no textual/binary headers).
 func (f *File) BuildTraceCatalogTraceOnly() (*TraceCatalog, error) {
+	return f.BuildTraceCatalogTraceOnlyWithProgress(nil)
+}
+
+// BuildTraceCatalogTraceOnlyWithProgress scans a trace-only file layout (SU style, no textual/binary headers).
+// Progress callbacks are optional and may be nil.
+func (f *File) BuildTraceCatalogTraceOnlyWithProgress(progress CatalogBuildProgressFunc) (*TraceCatalog, error) {
+	return f.BuildTraceCatalogTraceOnlyWithProgressAndCancel(progress, nil)
+}
+
+// BuildTraceCatalogTraceOnlyWithProgressAndCancel scans a trace-only file layout (SU style, no textual/binary headers).
+// Progress and cancel callbacks are optional and may be nil.
+func (f *File) BuildTraceCatalogTraceOnlyWithProgressAndCancel(progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
 	if f == nil {
 		return nil, fmt.Errorf("nil segy file")
 	}
@@ -745,12 +789,14 @@ func (f *File) BuildTraceCatalogTraceOnly() (*TraceCatalog, error) {
 		byteOrder = binary.BigEndian
 	}
 
-	catalog, err := BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(
+	catalog, err := BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(
 		f.URI,
 		r,
 		byteOrder,
 		f.BinaryHeader.DataSampleFormatCode,
 		f.BinaryHeader.SamplesPerTrace,
+		progress,
+		shouldCancel,
 	)
 	if err != nil {
 		return nil, err
@@ -769,6 +815,18 @@ func BuildTraceCatalogFromReader(uri fyne.URI, r io.Reader) (*TraceCatalog, erro
 // BuildTraceCatalogFromReaderWithByteOrder scans trace headers and payload lengths using byte order.
 // The reader must be positioned at byte zero of the SEG-Y file.
 func BuildTraceCatalogFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder) (*TraceCatalog, error) {
+	return BuildTraceCatalogFromReaderWithByteOrderAndProgress(uri, r, byteOrder, nil)
+}
+
+// BuildTraceCatalogFromReaderWithByteOrderAndProgress scans trace headers and payload lengths using byte order.
+// The reader must be positioned at byte zero of the SEG-Y file.
+func BuildTraceCatalogFromReaderWithByteOrderAndProgress(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, progress CatalogBuildProgressFunc) (*TraceCatalog, error) {
+	return BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri, r, byteOrder, progress, nil)
+}
+
+// BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel scans trace headers and payload lengths using byte order.
+// The reader must be positioned at byte zero of the SEG-Y file.
+func BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil reader")
 	}
@@ -789,9 +847,26 @@ func BuildTraceCatalogFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrd
 	}
 
 	traceStart := int64(TextualHeaderByteLength + BinaryHeaderByteLength + len(fileHeaders.ExtendedTextualHeader)*TextualHeaderByteLength)
+	totalBytes := estimateURIFileSize(uri)
+	if totalBytes > 0 {
+		totalBytes -= traceStart
+		if totalBytes < 0 {
+			totalBytes = 0
+		}
+	}
 	pos := traceStart
 	traceNumber := 0
+	if progress != nil {
+		progress(CatalogBuildProgress{TraceCount: 0, BytesProcessed: 0, TotalBytes: totalBytes, Done: false})
+	}
 	for {
+		if shouldCancel != nil && shouldCancel() {
+			if progress != nil {
+				progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos - traceStart, TotalBytes: totalBytes, Done: true, Canceled: true})
+			}
+			return nil, fmt.Errorf("%w after %d traces", ErrCatalogBuildCanceled, traceNumber)
+		}
+
 		traceHeaderBytes, readErr := readExact(r, TraceHeaderByteLength)
 		if readErr != nil {
 			if readErr == io.EOF {
@@ -841,6 +916,14 @@ func BuildTraceCatalogFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrd
 
 		pos += TraceHeaderByteLength + dataByteLength
 		traceNumber++
+
+		if progress != nil && traceNumber%500 == 0 {
+			progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos - traceStart, TotalBytes: totalBytes, Done: false})
+		}
+	}
+
+	if progress != nil {
+		progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos - traceStart, TotalBytes: totalBytes, Done: true})
 	}
 
 	catalog.buildIndexes()
@@ -855,6 +938,16 @@ func BuildTraceCatalogTraceOnlyFromReader(uri fyne.URI, r io.Reader, sampleForma
 
 // BuildTraceCatalogTraceOnlyFromReaderWithByteOrder scans trace headers/payload lengths from trace-only layout.
 func BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, defaultSamplesPerTrace uint16) (*TraceCatalog, error) {
+	return BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgress(uri, r, byteOrder, sampleFormatCode, defaultSamplesPerTrace, nil)
+}
+
+// BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgress scans trace headers/payload lengths from trace-only layout.
+func BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgress(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, defaultSamplesPerTrace uint16, progress CatalogBuildProgressFunc) (*TraceCatalog, error) {
+	return BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(uri, r, byteOrder, sampleFormatCode, defaultSamplesPerTrace, progress, nil)
+}
+
+// BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel scans trace headers/payload lengths from trace-only layout.
+func BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, defaultSamplesPerTrace uint16, progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil reader")
 	}
@@ -876,7 +969,18 @@ func BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(uri fyne.URI, r io.Reader
 
 	pos := int64(0)
 	traceNumber := 0
+	totalBytes := estimateURIFileSize(uri)
+	if progress != nil {
+		progress(CatalogBuildProgress{TraceCount: 0, BytesProcessed: 0, TotalBytes: totalBytes, Done: false})
+	}
 	for {
+		if shouldCancel != nil && shouldCancel() {
+			if progress != nil {
+				progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos, TotalBytes: totalBytes, Done: true, Canceled: true})
+			}
+			return nil, fmt.Errorf("%w after %d traces", ErrCatalogBuildCanceled, traceNumber)
+		}
+
 		traceHeaderBytes, readErr := readExact(r, TraceHeaderByteLength)
 		if readErr != nil {
 			if readErr == io.EOF {
@@ -923,10 +1027,35 @@ func BuildTraceCatalogTraceOnlyFromReaderWithByteOrder(uri fyne.URI, r io.Reader
 
 		pos += TraceHeaderByteLength + dataByteLength
 		traceNumber++
+
+		if progress != nil && traceNumber%500 == 0 {
+			progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos, TotalBytes: totalBytes, Done: false})
+		}
+	}
+
+	if progress != nil {
+		progress(CatalogBuildProgress{TraceCount: traceNumber, BytesProcessed: pos, TotalBytes: totalBytes, Done: true})
 	}
 
 	catalog.buildIndexes()
 	return catalog, nil
+}
+
+func estimateURIFileSize(uri fyne.URI) int64 {
+	if uri == nil {
+		return 0
+	}
+	if !strings.EqualFold(uri.Scheme(), "file") {
+		return 0
+	}
+	info, err := os.Stat(uri.Path())
+	if err != nil {
+		return 0
+	}
+	if info.Size() < 0 {
+		return 0
+	}
+	return info.Size()
 }
 
 // FindEqual returns all traces where the field exactly matches value.
@@ -1648,6 +1777,80 @@ func cloneTraces(traces [][]float32) [][]float32 {
 	return out
 }
 
+// SmoothTraceTimeRunningAverage applies a centered running-average smoother to one trace.
+// Window length must be >= 1. Edges use truncated windows to avoid phase shifts.
+func SmoothTraceTimeRunningAverage(trace []float32, windowLength int) ([]float32, error) {
+	if windowLength <= 0 {
+		return nil, fmt.Errorf("window length must be >= 1")
+	}
+	if len(trace) == 0 {
+		return []float32{}, nil
+	}
+	if windowLength == 1 {
+		out := make([]float32, len(trace))
+		copy(out, trace)
+		return out, nil
+	}
+
+	prefix := make([]float64, len(trace)+1)
+	for i := range trace {
+		prefix[i+1] = prefix[i] + float64(trace[i])
+	}
+
+	left := (windowLength - 1) / 2
+	right := windowLength / 2
+	out := make([]float32, len(trace))
+
+	for i := range trace {
+		start := i - left
+		if start < 0 {
+			start = 0
+		}
+		end := i + right + 1
+		if end > len(trace) {
+			end = len(trace)
+		}
+
+		sum := prefix[end] - prefix[start]
+		count := end - start
+		if count <= 0 {
+			out[i] = trace[i]
+			continue
+		}
+		out[i] = float32(sum / float64(count))
+	}
+
+	return out, nil
+}
+
+// SmoothEnsembleSamplesTimeRunningAverage applies time smoothing to each trace in one ensemble.
+// The returned ensemble is a new copy and the input ensemble is not modified.
+func SmoothEnsembleSamplesTimeRunningAverage(samples EnsembleSamples, windowLength int) (EnsembleSamples, error) {
+	if windowLength <= 0 {
+		return EnsembleSamples{}, fmt.Errorf("window length must be >= 1")
+	}
+	if samples.TraceCount == 0 || len(samples.Traces) == 0 {
+		return samples, nil
+	}
+
+	out := EnsembleSamples{
+		Traces:            make([][]float32, len(samples.Traces)),
+		TraceCount:        samples.TraceCount,
+		SamplesPerTrace:   samples.SamplesPerTrace,
+		TotalImageSamples: samples.TotalImageSamples,
+	}
+
+	for i := range samples.Traces {
+		smoothed, err := SmoothTraceTimeRunningAverage(samples.Traces[i], windowLength)
+		if err != nil {
+			return EnsembleSamples{}, err
+		}
+		out.Traces[i] = smoothed
+	}
+
+	return out, nil
+}
+
 // RenderEnsembleFromEntries reads, decodes, and renders selected traces as a paletted image.
 // If maxTotalImageSamples <= 0, DefaultMaxImageSamples is used.
 func (f *File) RenderEnsembleFromEntries(entries []TraceIndexEntry, maxTotalImageSamples int64, opts EnsembleImageOptions) (*image.Paletted, EnsembleImageStats, error) {
@@ -2053,6 +2256,104 @@ func InvertPalette(p color.Palette) color.Palette {
 		out[i] = p[len(p)-1-i]
 	}
 	return out
+}
+
+// HSVTriplet represents a color in HSV space.
+// H is hue in degrees [0, 360], S and V are in [0, 1].
+type HSVTriplet struct {
+	H float64
+	S float64
+	V float64
+}
+
+// ThreePointHSVPalette256 builds a 256-color palette from low->mid->high HSV anchors.
+// Palette indices are anchored at 0 (low), 128 (mid), and 255 (high).
+func ThreePointHSVPalette256(low, mid, high HSVTriplet) color.Palette {
+	lerpFloat := func(a, b, t float64) float64 {
+		return a + (b-a)*t
+	}
+
+	lerpHSV := func(a, b HSVTriplet, t float64) HSVTriplet {
+		if t < 0 {
+			t = 0
+		}
+		if t > 1 {
+			t = 1
+		}
+		return HSVTriplet{
+			H: lerpFloat(a.H, b.H, t),
+			S: lerpFloat(a.S, b.S, t),
+			V: lerpFloat(a.V, b.V, t),
+		}
+	}
+
+	p := make(color.Palette, 256)
+	for i := 0; i < 256; i++ {
+		if i <= 128 {
+			t := float64(i) / 128.0
+			h := lerpHSV(low, mid, t)
+			p[i] = hsvToRGBA(h)
+			continue
+		}
+
+		t := float64(i-128) / 127.0
+		h := lerpHSV(mid, high, t)
+		p[i] = hsvToRGBA(h)
+
+	}
+
+	return p
+}
+
+// BlueRedWhitePalette256 returns a concrete three-point HSV palette with
+// low=(240,1.0,0.7), mid=(0,1.0,0.5), high=(0,0,1.0).
+func BlueRedWhitePalette256() color.Palette {
+	return ThreePointHSVPalette256(
+		HSVTriplet{H: 240.0, S: 0.7, V: 1},
+		HSVTriplet{H: 0.0, S: 0.75, V: 1},
+		HSVTriplet{H: 0.0, S: 0.0, V: 1.0},
+	)
+}
+
+func hsvToRGBA(hsv HSVTriplet) color.RGBA {
+	h := math.Mod(hsv.H, 360.0)
+	if h < 0 {
+		h += 360.0
+	}
+	s := math.Max(0.0, math.Min(1.0, hsv.S))
+	v := math.Max(0.0, math.Min(1.0, hsv.V))
+
+	c := v * s
+	x := c * (1.0 - math.Abs(math.Mod(h/60.0, 2.0)-1.0))
+	m := v - c
+
+	var r1, g1, b1 float64
+	switch {
+	case h < 60:
+		r1, g1, b1 = c, x, 0
+	case h < 120:
+		r1, g1, b1 = x, c, 0
+	case h < 180:
+		r1, g1, b1 = 0, c, x
+	case h < 240:
+		r1, g1, b1 = 0, x, c
+	case h < 300:
+		r1, g1, b1 = x, 0, c
+	default:
+		r1, g1, b1 = c, 0, x
+	}
+
+	to8 := func(v float64) uint8 {
+		return uint8(math.Round(255.0 * math.Max(0.0, math.Min(1.0, v))))
+	}
+
+	return color.RGBA{
+		R: to8(r1 + m),
+		G: to8(g1 + m),
+		B: to8(b1 + m),
+		A: 255,
+	}
+
 }
 
 // MustPalette256 normalizes a palette to length 256.

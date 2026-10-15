@@ -38,6 +38,11 @@ It includes:
 | `(*File).DecodeTraceData(data)` | `([]float32, error)` | Decode raw trace bytes using file format/byte order settings. |
 | `(*File).ReadDecodedTraceFromIndex(entry)` | `(TraceHeader, []float32, error)` | Read and decode one trace from a catalog entry. |
 | `(*File).ReadDecodedTraceAtOffset(offset, sampleCount)` | `(TraceHeader, []float32, error)` | Read and decode one trace directly by byte offset. |
+| `(*File).BuildCDPGatherFromEntries(entries)` | `(CDPGather, error)` | Build one decoded CDP gather from selected trace entries. |
+| `ApplyNMOToCDPGatherWithOptions(gather, vf, options)` | `(CDPGather, error)` | Apply NMO to a CDP gather with extrapolation and stretch-mute controls. |
+| `BuildSemblanceGatherFromCDP(gather, minVel, maxVel, velStep)` | `(SemblanceGather, error)` | Build a semblance gather on uniform squared-slowness velocity sampling. |
+| `(SemblanceGather).VelocityAxis()` | `[]float64` | Return trial velocities in gather order (low velocity to high velocity). |
+| `ApplyHighCutToCDPGather(gather, highCutHz)` | `(CDPGather, error)` | Apply a zero-phase, two-pass Butterworth high-cut filter to a CDP gather. |
 | `(*File).ReadEnsembleSamples(entries, maxTotal)` | `(EnsembleSamples, error)` | Decode many traces to a rectangular 2D sample set with a hard sample-count guard. |
 | `RenderEnsembleImage(samples, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | Convert decoded 2D samples to a paletted image with clipping and zero-centering support. |
 | `(*File).RenderEnsembleFromEntries(entries, maxTotal, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | One-call read/decode/render from selected trace entries with threshold guard. |
@@ -280,6 +285,130 @@ _ = samples
 ```
 
 Supported sample format codes for decoding are: `1`, `2`, `3`, `5`, `6`, and `8`.
+
+## Apply normal moveout (NMO) to a CDP gather
+
+You can build a decoded CDP gather from selected entries and apply NMO using a stacking velocity function.
+
+```go
+// Select one CDP gather
+entries := catalog.FindEqual(segy.TraceHeaderFieldCDP, 1205)
+if len(entries) == 0 {
+	return fmt.Errorf("no traces for CDP 1205")
+}
+
+gather, err := f.BuildCDPGatherFromEntries(entries)
+if err != nil {
+	return err
+}
+
+vf := segy.VelocityFunction{
+	CDP: 1205,
+	Samples: []segy.VelocitySample{
+		{TimeMS: 0, StackingVelocity: 1500},
+		{TimeMS: 500, StackingVelocity: 1900},
+		{TimeMS: 1000, StackingVelocity: 2400},
+		{TimeMS: 1500, StackingVelocity: 2800},
+	},
+}
+
+nmoGather, err := segy.ApplyNMOToCDPGatherWithOptions(
+	gather,
+	vf,
+	segy.NMOOptions{
+		ExtrapolationMode: segy.VelocityExtrapolateLinear,
+		MaxStretchFraction: 0.35,
+	},
+)
+if err != nil {
+	return err
+}
+
+_ = nmoGather
+```
+
+Notes:
+
+- NMO output is a new gather; input gather is not modified.
+- Trace order is preserved.
+- Stretch mute is disabled when `MaxStretchFraction <= 0`.
+- Extrapolation mode can be `VelocityExtrapolateHold` (default behavior) or `VelocityExtrapolateLinear`.
+
+If you want to reuse the stretch-mute decisions in later steps (for example stacking), use the mask-returning variant:
+
+```go
+nmoGather, muteMask, err := segy.ApplyNMOToCDPGatherWithOptionsAndMask(
+	gather,
+	vf,
+	segy.NMOOptions{
+		ExtrapolationMode: segy.VelocityExtrapolateLinear,
+		MaxStretchFraction: 0.35,
+	},
+)
+if err != nil {
+	return err
+}
+
+stacked, err := segy.StackCDPGatherMean(nmoGather, &muteMask)
+if err != nil {
+	return err
+}
+
+_ = stacked
+```
+
+## Build a semblance gather from a CDP gather
+
+You can compute a semblance panel from one CDP gather by scanning trial velocities.
+Velocity sampling is uniform in squared slowness (`1/v^2`) for better shaping, and output order is low velocity to high velocity.
+
+```go
+// Starting from the same gather created above.
+semblance, err := segy.BuildSemblanceGatherFromCDP(
+	gather,
+	1400, // min velocity
+	3600, // max velocity
+	50,   // nominal velocity step
+)
+if err != nil {
+	return err
+}
+
+// Velocity axis for plotting columns/traces.
+velocityAxis := semblance.VelocityAxis()
+
+_ = velocityAxis
+_ = semblance
+```
+
+Notes:
+
+- `velocityStep` controls trial density; sampling is mapped to uniform squared-slowness spacing.
+- Each semblance trace corresponds to one trial velocity.
+- Semblance values are clamped to `[0, 1]`.
+
+## Apply a high-cut filter to a CDP gather
+
+You can apply a high-cut filter directly to a decoded gather.
+The implementation uses a 2nd-order Butterworth low-pass applied forward and backward to preserve phase.
+
+```go
+filteredGather, err := segy.ApplyHighCutToCDPGather(
+	gather,
+	80, // high-cut frequency in Hz
+)
+if err != nil {
+	return err
+}
+
+_ = filteredGather
+```
+
+Notes:
+
+- Output is a new gather; input gather is not modified.
+- `highCutHz` must be greater than zero and lower than Nyquist.
+- Forward + reverse application provides zero-phase filtering.
 
 ## Build a paletted image from an ensemble
 
