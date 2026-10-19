@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"math"
 	"strconv"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -25,6 +26,8 @@ type CDPSelectorOptions struct {
 // step entry, slider, and direct numeric entry.
 type CDPSelector struct {
 	Root         *fyne.Container
+	BackwardBtn  *widget.Button
+	ForwardBtn   *widget.Button
 	StepEntry    *widget.SelectEntry
 	Slider       *widget.Slider
 	CDPEntry     *widget.SelectEntry
@@ -115,13 +118,22 @@ func NewCDPSelector(opts CDPSelectorOptions) *CDPSelector {
 	s.PreviewLabel.Alignment = fyne.TextAlignCenter
 	s.PreviewLabel.Hide()
 
+	s.BackwardBtn = widget.NewButton("<", func() {
+		s.stepByCurrentValue(-1)
+	})
+	s.ForwardBtn = widget.NewButton(">", func() {
+		s.stepByCurrentValue(1)
+	})
+	s.BackwardBtn.Disable()
+	s.ForwardBtn.Disable()
+
 	stepSized := StackOverMinSizeRect(s.StepEntry, defaults.MinInputWidth, 2)
 	cdpSized := StackOverMinSizeRect(s.CDPEntry, defaults.MinInputWidth, 2)
 	sliderOverlay := container.NewCenter(s.PreviewLabel)
 	sliderMinRect := canvas.NewRectangle(color.Transparent)
 	sliderMinRect.SetMinSize(fyne.NewSize(300, 10))
 	sliderWithOverlay := container.NewStack(sliderMinRect, s.Slider, sliderOverlay)
-	sliderBox := container.NewBorder(nil, nil, widget.NewLabel("CDP"), nil, sliderWithOverlay)
+	sliderBox := container.NewBorder(nil, nil, widget.NewLabel("CDP"), nil, container.NewBorder(nil, nil, s.BackwardBtn, s.ForwardBtn, sliderWithOverlay))
 
 	s.Root = container.NewBorder(
 		nil,
@@ -156,6 +168,12 @@ func (s *CDPSelector) SetRange(minCDP, maxCDP int) {
 		s.Slider.Enable()
 		s.CDPEntry.SetText(strconv.Itoa(s.rangeMin))
 		s.CDPEntry.Enable()
+		if s.BackwardBtn != nil {
+			s.BackwardBtn.Enable()
+		}
+		if s.ForwardBtn != nil {
+			s.ForwardBtn.Enable()
+		}
 	})
 	if s.PreviewLabel != nil {
 		s.setPreview(s.rangeMin, false)
@@ -172,6 +190,12 @@ func (s *CDPSelector) Disable() {
 	s.withSuppressedEvents(func() {
 		s.Slider.Disable()
 		s.CDPEntry.Disable()
+		if s.BackwardBtn != nil {
+			s.BackwardBtn.Disable()
+		}
+		if s.ForwardBtn != nil {
+			s.ForwardBtn.Disable()
+		}
 	})
 	s.setPreview(0, false)
 }
@@ -215,6 +239,28 @@ func (s *CDPSelector) Select(cdp int) error {
 	return nil
 }
 
+func (s *CDPSelector) stepByCurrentValue(direction int) {
+	if !s.ready || direction == 0 {
+		return
+	}
+	current := s.currentCommittedCDP()
+	if current <= 0 {
+		current = s.rangeMin
+	}
+	step := s.currentStepValue()
+	if step <= 0 {
+		step = 10
+	}
+	target := current + direction*step
+	if target < s.rangeMin {
+		target = s.rangeMin
+	}
+	if target > s.rangeMax {
+		target = s.rangeMax
+	}
+	_ = s.Select(target)
+}
+
 func (s *CDPSelector) commitSelection(cdp int) {
 	if s.onCommit != nil {
 		s.onCommit(cdp)
@@ -226,6 +272,17 @@ func (s *CDPSelector) currentSliderCDP() int {
 		return 0
 	}
 	return s.snapCDPToStep(int(math.Round(s.Slider.Value)))
+}
+
+func (s *CDPSelector) currentCommittedCDP() int {
+	if s.CDPEntry == nil {
+		return 0
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(s.CDPEntry.Text))
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func (s *CDPSelector) applySliderStepFromEntry() {

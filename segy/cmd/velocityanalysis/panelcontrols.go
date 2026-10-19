@@ -28,6 +28,9 @@ var semblanceVelStepEntry *widget.Entry
 var semblancePowerEntry *widget.Entry
 var semblanceClipEntry *widget.Entry
 var semblanceStretchMuteEntry *widget.Entry
+var stackOverlayEnabledCheck *widget.Check
+var stackOverlayOpacitySlider *widget.Slider
+var stackOverlayOpacityLabel *widget.Label
 
 var gainTSquaredCard *widget.Card
 var gainAGCCard *widget.Card
@@ -38,19 +41,22 @@ var lastNyquistHz float64
 var highCutAuto bool = true
 
 const (
-	defaultSemblancePalette = "Blue-Red-White"
-	defaultGainMode         = "None"
-	defaultTSquaredScale    = "1.0"
-	defaultAGCWindow        = "101"
-	defaultAGCFloor         = "1e-6"
-	defaultSmoothingWindow  = "1"
-	defaultSemblanceVMin    = "1200"
-	defaultSemblanceVMax    = "4500"
-	defaultSemblanceDV      = "50"
-	defaultSemblancePower   = "1.0"
-	defaultSemblanceClip    = "2.5"
-	defaultStretchMute      = "0"
-	defaultCDPStep          = 10
+	defaultSemblancePalette    = "Blue-Red-White"
+	defaultGainMode            = "None"
+	defaultTSquaredScale       = "1.0"
+	defaultAGCWindow           = "101"
+	defaultAGCFloor            = "1e-6"
+	defaultSmoothingWindow     = "1"
+	defaultSemblanceVMin       = "1200"
+	defaultSemblanceVMax       = "4500"
+	defaultSemblanceDV         = "50"
+	defaultSemblancePower      = "1.0"
+	defaultSemblanceClip       = "2.5"
+	defaultStretchMute         = "0"
+	defaultCDPStep             = 10
+	defaultStackOverlayOpacity = "0"
+	prefStackOverlayEnabled    = "velocityanalysis.ctrl.stack_overlay_enabled"
+	prefStackOverlayOpacity    = "velocityanalysis.ctrl.stack_overlay_opacity"
 )
 
 func initControlsPopup() {
@@ -126,6 +132,24 @@ func initControlsPopup() {
 	semblanceStretchMuteEntry.SetText(defaultStretchMute)
 	semblanceStretchMuteEntry.OnSubmitted = func(_ string) { reprocessCurrentCDPAsync() }
 
+	stackOverlayEnabledCheck = widget.NewCheck("Enable Stack Velocity Overlay", func(enabled bool) {
+		if suppressControlEvents {
+			return
+		}
+		refreshStackPickMarkers()
+	})
+
+	stackOverlayOpacityLabel = widget.NewLabel("0%")
+	stackOverlayOpacitySlider = widget.NewSlider(0, 60)
+	stackOverlayOpacitySlider.Step = 1
+	stackOverlayOpacitySlider.OnChanged = func(value float64) {
+		stackOverlayOpacityLabel.SetText(fmt.Sprintf("%.0f%%", value))
+		if suppressControlEvents {
+			return
+		}
+		refreshStackPickMarkers()
+	}
+
 	gainTSquaredCard = widget.NewCard("T-Squared", "", widget.NewForm(
 		widget.NewFormItem("Scale", tSquaredScaleEntry),
 	))
@@ -147,6 +171,7 @@ func initControlsPopup() {
 		widget.NewFormItem("Semblance Power", semblancePowerEntry),
 		widget.NewFormItem("Semblance Clip (%)", semblanceClipEntry),
 		widget.NewFormItem("Stretch Mute", semblanceStretchMuteEntry),
+		widget.NewFormItem("Stack Velocity Overlay", container.NewVBox(stackOverlayEnabledCheck, container.NewHBox(stackOverlayOpacitySlider, stackOverlayOpacityLabel))),
 	)
 
 	applyButton := widget.NewButton("Apply", reprocessCurrentCDPAsync)
@@ -423,6 +448,24 @@ func restoreControlPreferences() {
 	if semblanceStretchMuteEntry != nil {
 		semblanceStretchMuteEntry.SetText(prefs.StringWithFallback(prefSemblanceStretchMute, semblanceStretchMuteEntry.Text))
 	}
+	if stackOverlayEnabledCheck != nil {
+		stackOverlayEnabledCheck.SetChecked(prefs.BoolWithFallback(prefStackOverlayEnabled, false))
+	}
+	if stackOverlayOpacitySlider != nil {
+		text := prefs.StringWithFallback(prefStackOverlayOpacity, defaultStackOverlayOpacity)
+		if v, err := strconv.ParseFloat(text, 64); err == nil {
+			suppressControlEvents = true
+			if v < 0 {
+				v = 0
+			}
+			if v > 60 {
+				v = 60
+			}
+			stackOverlayOpacitySlider.SetValue(v)
+			suppressControlEvents = false
+			stackOverlayOpacityLabel.SetText(fmt.Sprintf("%.0f%%", v))
+		}
+	}
 
 	highCutAuto = prefs.BoolWithFallback(prefHighCutAuto, true)
 	if highCutEntry != nil {
@@ -485,6 +528,12 @@ func persistControlPreferences() {
 	if semblanceStretchMuteEntry != nil {
 		prefs.SetString(prefSemblanceStretchMute, strings.TrimSpace(semblanceStretchMuteEntry.Text))
 	}
+	if stackOverlayEnabledCheck != nil {
+		prefs.SetBool(prefStackOverlayEnabled, stackOverlayEnabledCheck.Checked)
+	}
+	if stackOverlayOpacitySlider != nil {
+		prefs.SetString(prefStackOverlayOpacity, fmt.Sprintf("%.0f", stackOverlayOpacitySlider.Value))
+	}
 }
 
 func applyDefaultControlValues() {
@@ -529,6 +578,19 @@ func applyDefaultControlValues() {
 	if semblanceStretchMuteEntry != nil {
 		semblanceStretchMuteEntry.SetText(defaultStretchMute)
 	}
+	if stackOverlayEnabledCheck != nil {
+		suppressControlEvents = true
+		stackOverlayEnabledCheck.SetChecked(false)
+		suppressControlEvents = false
+	}
+	if stackOverlayOpacitySlider != nil {
+		suppressControlEvents = true
+		stackOverlayOpacitySlider.SetValue(0)
+		suppressControlEvents = false
+		if stackOverlayOpacityLabel != nil {
+			stackOverlayOpacityLabel.SetText("0%")
+		}
+	}
 	if highCutEntry != nil {
 		suppressControlEvents = true
 		highCutEntry.SetText("")
@@ -539,6 +601,7 @@ func applyDefaultControlValues() {
 	if cdpSelector != nil && cdpSelector.StepEntry != nil {
 		cdpSelector.StepEntry.SetText(strconv.Itoa(defaultCDPStep))
 	}
+	refreshStackPickMarkers()
 }
 
 func resetPreferencesToDefaults() {

@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	fyne.io/fyne/v2 v2.8.1
-	github.com/hippodribble/drawing v0.1.7
+	github.com/hippodribble/drawing v0.1.11
 	github.com/jonas-p/go-shp v0.1.1
 	golang.org/x/text v0.43.0
 )

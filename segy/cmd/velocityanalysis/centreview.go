@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"runtime"
 	"sort"
@@ -69,6 +70,10 @@ var stackDirtyFull = true
 var stackDirtyRangeSet bool
 var stackDirtyRangeMin int64
 var stackDirtyRangeMax int64
+var stackBaseImage *image.Paletted
+var stackBaseSampleIntervalMS float64
+var stackBaseSampleCount int
+var stackOverlayRefreshInProgress bool
 
 func buildCentreView() *fyne.Container {
 	cdpImageView = velocitywidgets.NewEnsembleImageView(velocitywidgets.EnsembleImageViewOptions{
@@ -193,8 +198,8 @@ func buildCentreView() *fyne.Container {
 
 	applyCDPMutePickEditState()
 
-	left := container.NewBorder(widget.NewLabel("CDP"), nil, nil, nil, cdpImageView)
-	right := container.NewBorder(widget.NewLabel("Semblance"), nil, nil, nil, semblanceImageView)
+	right := container.NewBorder(widget.NewLabel("CDP"), nil, nil, nil, cdpImageView)
+	left := container.NewBorder(widget.NewLabel("Semblance"), nil, nil, nil, semblanceImageView)
 	upperSplit := container.NewHSplit(left, right)
 	upperSplit.Offset = readEnsembleSplitOffsetPreference(prefEnsembleUpperSplit, 0.5)
 	stackPanel := container.NewBorder(widget.NewLabel("Stack Section"), nil, nil, nil, stackImageView)
@@ -401,6 +406,7 @@ func clearEnsembleImageView() {
 		stackCacheProcessingSignature = ""
 		stackCacheReady = false
 		markStackDirtyFull()
+		setStackExportAvailable(false)
 		if cdpImageView != nil {
 			cdpImageView.Clear()
 		}
@@ -1251,6 +1257,14 @@ func handleStackCursorTap(info velocitywidgets.EnsembleCursorInfo) {
 }
 
 func refreshStackPickMarkers() {
+	applyStackPickMarkers()
+	if stackOverlayRefreshInProgress {
+		return
+	}
+	refreshStackVelocityOverlay()
+}
+
+func applyStackPickMarkers() {
 	if stackImageView == nil || len(stackCDPAxis) == 0 {
 		if stackImageView != nil {
 			stackImageView.SetVerticalMarkerFractions(nil, nil, nil)
@@ -1298,6 +1312,153 @@ func refreshStackPickMarkers() {
 	} else {
 		stackImageView.SetActiveVerticalMarkerFraction(math.NaN())
 	}
+}
+
+func refreshStackVelocityOverlay() {
+	if stackImageView == nil || stackBaseImage == nil || stackBaseSampleCount <= 0 || stackBaseSampleIntervalMS <= 0 {
+		return
+	}
+	if !stackOverlayEnabled() {
+		stackOverlayRefreshInProgress = true
+		fyne.Do(func() {
+			stackImageView.SetImage(stackBaseImage, stackBaseSampleIntervalMS, stackBaseSampleCount)
+			applyStackPickMarkers()
+			ensembleViewSyncState.ApplyCurrent(stackImageView)
+		})
+		stackOverlayRefreshInProgress = false
+		return
+	}
+
+	opacity := stackOverlayOpacityFraction()
+	base := stackBaseImage
+	if opacity <= 0 || len(stackCDPAxis) == 0 {
+		stackOverlayRefreshInProgress = true
+		fyne.Do(func() {
+			stackImageView.SetImage(base, stackBaseSampleIntervalMS, stackBaseSampleCount)
+			applyStackPickMarkers()
+			ensembleViewSyncState.ApplyCurrent(stackImageView)
+		})
+		stackOverlayRefreshInProgress = false
+		return
+	}
+
+	overlayTraces := make([][]float32, len(stackCDPAxis))
+	hasOverlay := false
+	for i, cdp := range stackCDPAxis {
+		picks := effectiveSemblancePicksForCDP(cdp)
+		trace := make([]float32, stackBaseSampleCount)
+		for sample := 0; sample < stackBaseSampleCount; sample++ {
+			velocity := semblanceVelocityAtTime(picks, float64(sample)*stackBaseSampleIntervalMS)
+			if !isFiniteFloat64(velocity) || velocity <= 0 {
+				trace[sample] = float32(math.NaN())
+				continue
+			}
+			trace[sample] = float32(velocity)
+			hasOverlay = true
+		}
+		overlayTraces[i] = trace
+	}
+	if !hasOverlay {
+		stackOverlayRefreshInProgress = true
+		fyne.Do(func() {
+			stackImageView.SetImage(base, stackBaseSampleIntervalMS, stackBaseSampleCount)
+			applyStackPickMarkers()
+			ensembleViewSyncState.ApplyCurrent(stackImageView)
+		})
+		stackOverlayRefreshInProgress = false
+		return
+	}
+
+	overlayImg, _, err := segy.RenderEnsembleImage(segy.EnsembleSamples{
+		Traces:            overlayTraces,
+		TraceCount:        len(overlayTraces),
+		SamplesPerTrace:   stackBaseSampleCount,
+		TotalImageSamples: int64(len(overlayTraces)) * int64(stackBaseSampleCount),
+	}, segy.EnsembleImageOptions{
+		Palette:        blueWhiteRedPalette(false),
+		PercentileClip: 2,
+		ZeroCentered:   false,
+	})
+	if err != nil || overlayImg == nil {
+		stackOverlayRefreshInProgress = true
+		fyne.Do(func() {
+			stackImageView.SetImage(base, stackBaseSampleIntervalMS, stackBaseSampleCount)
+			applyStackPickMarkers()
+			ensembleViewSyncState.ApplyCurrent(stackImageView)
+		})
+		stackOverlayRefreshInProgress = false
+		return
+	}
+
+	composited := compositeStackVelocityOverlay(base, overlayImg, overlayTraces, opacity)
+	stackOverlayRefreshInProgress = true
+	fyne.Do(func() {
+		stackImageView.SetImage(composited, stackBaseSampleIntervalMS, stackBaseSampleCount)
+		applyStackPickMarkers()
+		ensembleViewSyncState.ApplyCurrent(stackImageView)
+	})
+	stackOverlayRefreshInProgress = false
+}
+
+func stackOverlayOpacityFraction() float64 {
+	if stackOverlayOpacitySlider == nil {
+		return 0
+	}
+	if stackOverlayOpacitySlider.Value <= 0 {
+		return 0
+	}
+	if stackOverlayOpacitySlider.Value >= 60 {
+		return 1
+	}
+	return stackOverlayOpacitySlider.Value / 60.0
+}
+
+func stackOverlayEnabled() bool {
+	return stackOverlayEnabledCheck != nil && stackOverlayEnabledCheck.Checked
+}
+
+func compositeStackVelocityOverlay(base, overlay *image.Paletted, overlayTraces [][]float32, opacity float64) *image.NRGBA {
+	bounds := base.Bounds()
+	out := image.NewNRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			baseColor := color.NRGBAModel.Convert(base.At(x, y)).(color.NRGBA)
+			trace := overlayTraces[x-bounds.Min.X]
+			v := trace[y-bounds.Min.Y]
+			if !isFiniteFloat64(float64(v)) {
+				out.SetNRGBA(x, y, baseColor)
+				continue
+			}
+			overlayColor := color.NRGBAModel.Convert(overlay.At(x, y)).(color.NRGBA)
+			out.SetNRGBA(x, y, blendNRGBA(baseColor, overlayColor, opacity))
+		}
+	}
+	return out
+}
+
+func blendNRGBA(base, overlay color.NRGBA, opacity float64) color.NRGBA {
+	if opacity <= 0 {
+		return base
+	}
+	if opacity > 1 {
+		opacity = 1
+	}
+	alpha := opacity * (float64(overlay.A) / 255.0)
+	if alpha <= 0 {
+		return base
+	}
+	inv := 1.0 - alpha
+	return color.NRGBA{
+		R: uint8(math.Round(float64(base.R)*inv + float64(overlay.R)*alpha)),
+		G: uint8(math.Round(float64(base.G)*inv + float64(overlay.G)*alpha)),
+		B: uint8(math.Round(float64(base.B)*inv + float64(overlay.B)*alpha)),
+		A: 255,
+	}
+}
+
+func isFiniteFloat64(v float64) bool {
+	f := v
+	return !math.IsNaN(f) && !math.IsInf(f, 0)
 }
 
 func stackFractionForCDP(cdp int64) (float64, bool) {
@@ -1897,6 +2058,18 @@ func buildWholeLineStackAsync() {
 
 		if len(stackTraces) == 0 || maxSamples <= 0 {
 			if id == atomic.LoadUint64(&stackRenderSeq) {
+				setStackExportAvailable(false)
+				fyne.Do(func() {
+					if stackImageView != nil {
+						stackImageView.Clear()
+						stackImageView.SetVerticalMarkerFractions(nil, nil, nil)
+						stackImageView.SetActiveVerticalMarkerFraction(math.NaN())
+					}
+					stackBaseImage = nil
+					stackBaseSampleIntervalMS = 0
+					stackBaseSampleCount = 0
+					stackCDPAxis = nil
+				})
 				pushStatus("No stack traces could be built")
 				setStackStateLabel(fmt.Sprintf("Stack: 0/%d kept (g:%d p:%d n:%d s:%d dt:%d)", processedCount, skipGather, skipProcessing, skipNMO, skipStack, skipDTMismatch))
 			}
@@ -1950,6 +2123,9 @@ func buildWholeLineStackAsync() {
 		stackDirtyRangeMax = 0
 
 		fyne.Do(func() {
+			stackBaseImage = img
+			stackBaseSampleIntervalMS = referenceDT
+			stackBaseSampleCount = maxSamples
 			stackImageView.SetImage(img, referenceDT, maxSamples)
 			stackCDPAxis = append([]int64(nil), keptCDPs...)
 			refreshStackPickMarkers()
@@ -1957,6 +2133,7 @@ func buildWholeLineStackAsync() {
 			ensembleViewSyncState.ApplyCurrent(stackImageView)
 		})
 		pushStatus(fmt.Sprintf("Stack section ready: %d CDPs (%d to %d)", len(keptCDPs), keptCDPs[0], keptCDPs[len(keptCDPs)-1]))
+		setStackExportAvailable(true)
 		mode := "full"
 		if !fullRebuild {
 			mode = "partial"

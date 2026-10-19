@@ -21,6 +21,7 @@ var pickLockCheck *widget.Check
 var autoStackCheck *widget.Check
 var nmoStateLabel *widget.Label
 var stackStateLabel *widget.Label
+var btnExportStack *widget.Button
 var suppressPickControlEvents bool
 var autoStackEnabled bool
 
@@ -121,8 +122,10 @@ func buildTopRightControls() *fyne.Container {
 		confirmClearAllPicks("Clear All Top Mute Picks?", "This will remove all top mute picks across all CDPs.", clearAllMutePicks)
 	})
 	btnBuildStack := widget.NewButton("Build Stack", buildWholeLineStackAsync)
+	btnExportStack = widget.NewButton("Export Stack", exportStackSection)
+	btnExportStack.Disable()
 
-	row1 := container.NewHBox(cdpSelector.CanvasObject(), pickModeCheck, muteModeCheck, nmoPreviewCheck, pickLockCheck, autoStackCheck, btnClearVelocity, btnClearMute, btnClearAllVelocity, btnClearAllMute, btnBuildStack, btnImport, btnExport)
+	row1 := container.NewHBox(cdpSelector.CanvasObject(), pickModeCheck, muteModeCheck, nmoPreviewCheck, pickLockCheck, autoStackCheck, btnClearVelocity, btnClearMute, btnClearAllVelocity, btnClearAllMute, btnBuildStack, btnExportStack, btnImport, btnExport)
 	row2 := container.NewHBox(nmoStateLabel, stackStateLabel)
 	controls := container.NewVBox(row1, row2)
 
@@ -131,7 +134,21 @@ func buildTopRightControls() *fyne.Container {
 	syncPickLockCheck(false)
 	updateNMOIndicatorForCurrent()
 	setStackStateLabel("Stack: idle")
+	setStackExportAvailable(false)
 	return container.NewStack(controls)
+}
+
+func setStackExportAvailable(available bool) {
+	if btnExportStack == nil {
+		return
+	}
+	fyne.Do(func() {
+		if available {
+			btnExportStack.Enable()
+			return
+		}
+		btnExportStack.Disable()
+	})
 }
 
 func readPickModePreference() bool {

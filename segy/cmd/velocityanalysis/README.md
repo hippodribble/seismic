@@ -53,6 +53,7 @@ Then:
 ### Stack review
 
 - `Build Stack` creates a stacked section for the full line.
+- `Export Stack` writes the current stacked section to `.segy`, `.sgy`, or `.su`.
 - The stack panel shows picked CDP markers and active cursor guides.
 - Click on the stack view to jump to the corresponding CDP.
 

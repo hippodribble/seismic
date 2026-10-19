@@ -165,6 +165,209 @@ type TraceHeader struct {
 	Raw [TraceHeaderByteLength]byte
 }
 
+// TraceHeaderValueType identifies the numeric type to decode from a trace header byte offset.
+type TraceHeaderValueType string
+
+const (
+	TraceHeaderValueTypeInt8    TraceHeaderValueType = "int8"
+	TraceHeaderValueTypeUint8   TraceHeaderValueType = "uint8"
+	TraceHeaderValueTypeInt16   TraceHeaderValueType = "int16"
+	TraceHeaderValueTypeUint16  TraceHeaderValueType = "uint16"
+	TraceHeaderValueTypeInt32   TraceHeaderValueType = "int32"
+	TraceHeaderValueTypeUint32  TraceHeaderValueType = "uint32"
+	TraceHeaderValueTypeFloat32 TraceHeaderValueType = "float32"
+	TraceHeaderValueTypeFloat64 TraceHeaderValueType = "float64"
+)
+
+func (t TraceHeaderValueType) byteLength() (int, error) {
+	switch t {
+	case TraceHeaderValueTypeInt8, TraceHeaderValueTypeUint8:
+		return 1, nil
+	case TraceHeaderValueTypeInt16, TraceHeaderValueTypeUint16:
+		return 2, nil
+	case TraceHeaderValueTypeInt32, TraceHeaderValueTypeUint32, TraceHeaderValueTypeFloat32:
+		return 4, nil
+	case TraceHeaderValueTypeFloat64:
+		return 8, nil
+	default:
+		return 0, fmt.Errorf("unsupported trace header value type %q", t)
+	}
+}
+
+// DecodeTraceHeaderValue decodes a raw byte slice as the requested numeric type.
+func DecodeTraceHeaderValue(data []byte, valueType TraceHeaderValueType, byteOrder binary.ByteOrder) (any, error) {
+	if byteOrder == nil {
+		byteOrder = binary.BigEndian
+	}
+
+	length, err := valueType.byteLength()
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < length {
+		return nil, fmt.Errorf("insufficient bytes for %s: have %d need %d", valueType, len(data), length)
+	}
+
+	switch valueType {
+	case TraceHeaderValueTypeInt8:
+		return int8(data[0]), nil
+	case TraceHeaderValueTypeUint8:
+		return data[0], nil
+	case TraceHeaderValueTypeInt16:
+		return int16(byteOrder.Uint16(data[:2])), nil
+	case TraceHeaderValueTypeUint16:
+		return byteOrder.Uint16(data[:2]), nil
+	case TraceHeaderValueTypeInt32:
+		return int32(byteOrder.Uint32(data[:4])), nil
+	case TraceHeaderValueTypeUint32:
+		return byteOrder.Uint32(data[:4]), nil
+	case TraceHeaderValueTypeFloat32:
+		return math.Float32frombits(byteOrder.Uint32(data[:4])), nil
+	case TraceHeaderValueTypeFloat64:
+		return math.Float64frombits(byteOrder.Uint64(data[:8])), nil
+	default:
+		return nil, fmt.Errorf("unsupported trace header value type %q", valueType)
+	}
+}
+
+// ReadTraceHeaderValueAtOffset reads a numeric value from a trace at the given byte offset.
+// The file offset is headerOffset + valueOffset, and the value is decoded according to the given type.
+func (f *File) ReadTraceHeaderValueAtOffset(headerOffset int64, valueOffset int64, valueType TraceHeaderValueType) (any, error) {
+	if f == nil {
+		return nil, fmt.Errorf("nil segy file")
+	}
+	if f.URI == nil {
+		return nil, fmt.Errorf("nil uri")
+	}
+	if headerOffset < 0 {
+		return nil, fmt.Errorf("invalid header offset %d", headerOffset)
+	}
+	if valueOffset < 0 {
+		return nil, fmt.Errorf("invalid value offset %d", valueOffset)
+	}
+
+	length, err := valueType.byteLength()
+	if err != nil {
+		return nil, err
+	}
+
+	r, err := storage.Reader(f.URI)
+	if err != nil {
+		return nil, fmt.Errorf("open segy uri: %w", err)
+	}
+	defer r.Close()
+
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return nil, fmt.Errorf("reader for uri does not support random access")
+	}
+
+	_, err = seeker.Seek(headerOffset+valueOffset, io.SeekStart)
+	if err != nil {
+		return nil, fmt.Errorf("seek to trace header value: %w", err)
+	}
+
+	data, err := readExact(r, length)
+	if err != nil {
+		return nil, fmt.Errorf("read trace header value at %d: %w", valueOffset, err)
+	}
+
+	byteOrder := f.ByteOrder
+	if byteOrder == nil {
+		byteOrder = binary.BigEndian
+	}
+	return DecodeTraceHeaderValue(data, valueType, byteOrder)
+}
+
+// ReadCustomTraceValuesFromBytes decodes a set of custom values directly from a trace header slice.
+// Custom field offsets are interpreted as 1-based SEG-Y byte positions within the 240-byte trace header.
+func ReadCustomTraceValuesFromBytes(traceHeader []byte, fields []CustomTraceField, byteOrder binary.ByteOrder) (map[string]any, error) {
+	if byteOrder == nil {
+		byteOrder = binary.BigEndian
+	}
+
+	out := make(map[string]any, len(fields))
+	for _, field := range fields {
+		if field.Name == "" {
+			return nil, fmt.Errorf("custom trace field name is required")
+		}
+		if field.Offset <= 0 {
+			return nil, fmt.Errorf("custom trace field %q has invalid 1-based byte position %d", field.Name, field.Offset)
+		}
+		length, err := field.Type.byteLength()
+		if err != nil {
+			return nil, fmt.Errorf("custom trace field %q: %w", field.Name, err)
+		}
+		start := field.Offset - 1
+		end := start + int64(length)
+		if end > int64(len(traceHeader)) {
+			return nil, fmt.Errorf("custom trace field %q byte position %d exceeds trace header length %d", field.Name, field.Offset, len(traceHeader))
+		}
+		value, err := DecodeTraceHeaderValue(traceHeader[start:end], field.Type, byteOrder)
+		if err != nil {
+			return nil, fmt.Errorf("custom trace field %q: %w", field.Name, err)
+		}
+		out[field.Name] = value
+	}
+	return out, nil
+}
+
+// ReadCustomTraceValuesAtOffset reads custom byte-offset values for one trace.
+func (f *File) ReadCustomTraceValuesAtOffset(headerOffset int64, fields []CustomTraceField) (map[string]any, error) {
+	if f == nil {
+		return nil, fmt.Errorf("nil segy file")
+	}
+	if f.URI == nil {
+		return nil, fmt.Errorf("nil uri")
+	}
+	if headerOffset < 0 {
+		return nil, fmt.Errorf("invalid header offset %d", headerOffset)
+	}
+
+	byteOrder := f.ByteOrder
+	if byteOrder == nil {
+		byteOrder = binary.BigEndian
+	}
+
+	r, err := storage.Reader(f.URI)
+	if err != nil {
+		return nil, fmt.Errorf("open segy uri: %w", err)
+	}
+	defer r.Close()
+
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return nil, fmt.Errorf("reader for uri does not support random access")
+	}
+
+	if _, err := seeker.Seek(headerOffset, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("seek to trace header: %w", err)
+	}
+
+	headerBytes, err := readExact(r, TraceHeaderByteLength)
+	if err != nil {
+		return nil, fmt.Errorf("read trace header: %w", err)
+	}
+
+	return ReadCustomTraceValuesFromBytes(headerBytes, fields, byteOrder)
+}
+
+// BuildCustomTraceCatalog creates a catalog of standard traces plus custom byte-offset values.
+func (f *File) BuildCustomTraceCatalog(entries []TraceIndexEntry, fields []CustomTraceField) ([]CustomTraceIndexEntry, error) {
+	if f == nil {
+		return nil, fmt.Errorf("nil segy file")
+	}
+	out := make([]CustomTraceIndexEntry, 0, len(entries))
+	for _, entry := range entries {
+		custom, err := f.ReadCustomTraceValuesAtOffset(entry.HeaderOffset, fields)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, CustomTraceIndexEntry{TraceIndexEntry: entry, Custom: custom})
+	}
+	return out, nil
+}
+
 // File represents an industry-standard SEG-Y file.
 // URI stores the source location through Fyne's storage-compatible URI type.
 type File struct {
@@ -207,6 +410,24 @@ type TraceIndexEntry struct {
 	SampleFormatCode uint16
 	SampleByteLength uint8
 	Header           TraceHeader
+}
+
+// CustomTraceField describes one non-standard value harvested from a trace by 1-based SEG-Y byte position and type.
+type CustomTraceField struct {
+	Name   string
+	Offset int64
+	Type   TraceHeaderValueType
+}
+
+// CustomTraceIndexEntry stores a standard trace index entry plus custom fields.
+type CustomTraceIndexEntry struct {
+	TraceIndexEntry
+	Custom map[string]any
+}
+
+// CustomTraceCatalog stores trace entries plus any custom column values derived from byte offsets.
+type CustomTraceCatalog struct {
+	Entries []CustomTraceIndexEntry
 }
 
 // TraceQueryOperator selects how a TraceQueryPredicate is evaluated.
@@ -438,6 +659,36 @@ func OpenWithByteOrder(uri fyne.URI, byteOrder binary.ByteOrder) (*File, error) 
 	return ReadHeadersWithByteOrder(uri, r, byteOrder)
 }
 
+// OpenSEGYWithByteOrderAndFormat reads a SEG-Y file using explicit byte order and sample format code.
+// The provided sample format code overrides the value from the on-disk binary header.
+func OpenSEGYWithByteOrderAndFormat(uri fyne.URI, byteOrder binary.ByteOrder, sampleFormatCode uint16) (*File, error) {
+	if uri == nil {
+		return nil, fmt.Errorf("nil uri")
+	}
+	if byteOrder == nil {
+		return nil, fmt.Errorf("nil byte order")
+	}
+	if _, err := sampleByteLength(sampleFormatCode); err != nil {
+		return nil, fmt.Errorf("invalid SEG-Y sample format code %d: %w", sampleFormatCode, err)
+	}
+
+	r, err := storage.Reader(uri)
+	if err != nil {
+		return nil, fmt.Errorf("open segy uri: %w", err)
+	}
+	defer r.Close()
+
+	segyFile, err := ReadHeadersWithByteOrder(uri, r, byteOrder)
+	if err != nil {
+		return nil, err
+	}
+
+	segyFile.BinaryHeader.DataSampleFormatCode = sampleFormatCode
+	byteOrder.PutUint16(segyFile.BinaryHeader.Raw[24:26], sampleFormatCode)
+
+	return segyFile, nil
+}
+
 // OpenSU reads a trace-only Seismic Unix file (no textual/binary SEG-Y headers).
 // It assumes big-endian IEEE float32 trace payloads.
 func OpenSU(uri fyne.URI) (*File, error) {
@@ -530,6 +781,7 @@ func ReadHeadersWithByteOrder(uri fyne.URI, r io.Reader, byteOrder binary.ByteOr
 	segyFile.BinaryHeader = bh
 
 	if bh.ExtendedTextHeadersCount > 0 {
+		fmt.Println("Extended headers count:", bh.ExtendedTextHeadersCount)
 		segyFile.ExtendedTextualHeader = make([]TextualHeader, 0, bh.ExtendedTextHeadersCount)
 		for i := int16(0); i < bh.ExtendedTextHeadersCount; i++ {
 			extData, extErr := readExact(r, TextualHeaderByteLength)
@@ -748,7 +1000,14 @@ func (f *File) BuildTraceCatalogWithProgressAndCancel(progress CatalogBuildProgr
 		byteOrder = binary.BigEndian
 	}
 
-	catalog, err := BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(f.URI, r, byteOrder, progress, shouldCancel)
+	catalog, err := BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgressAndCancel(
+		f.URI,
+		r,
+		byteOrder,
+		f.BinaryHeader.DataSampleFormatCode,
+		progress,
+		shouldCancel,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -824,19 +1083,54 @@ func BuildTraceCatalogFromReaderWithByteOrderAndProgress(uri fyne.URI, r io.Read
 	return BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri, r, byteOrder, progress, nil)
 }
 
+// BuildTraceCatalogFromReaderWithByteOrderAndFormat scans trace headers and payload lengths using byte order and explicit sample format code.
+// The reader must be positioned at byte zero of the SEG-Y file.
+func BuildTraceCatalogFromReaderWithByteOrderAndFormat(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16) (*TraceCatalog, error) {
+	return BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgress(uri, r, byteOrder, sampleFormatCode, nil)
+}
+
+// BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgress scans trace headers and payload lengths using byte order and explicit sample format code.
+// The reader must be positioned at byte zero of the SEG-Y file.
+func BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgress(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, progress CatalogBuildProgressFunc) (*TraceCatalog, error) {
+	return BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgressAndCancel(uri, r, byteOrder, sampleFormatCode, progress, nil)
+}
+
 // BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel scans trace headers and payload lengths using byte order.
 // The reader must be positioned at byte zero of the SEG-Y file.
 func BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
+	return buildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri, r, byteOrder, nil, progress, shouldCancel)
+}
+
+// BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgressAndCancel scans trace headers and payload lengths using byte order and explicit sample format code.
+// The reader must be positioned at byte zero of the SEG-Y file.
+func BuildTraceCatalogFromReaderWithByteOrderAndFormatAndProgressAndCancel(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCode uint16, progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
+	return buildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri, r, byteOrder, &sampleFormatCode, progress, shouldCancel)
+}
+
+func buildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, r io.Reader, byteOrder binary.ByteOrder, sampleFormatCodeOverride *uint16, progress CatalogBuildProgressFunc, shouldCancel CatalogBuildCancelFunc) (*TraceCatalog, error) {
 	if r == nil {
 		return nil, fmt.Errorf("nil reader")
 	}
 	if byteOrder == nil {
 		return nil, fmt.Errorf("nil byte order")
 	}
+	if sampleFormatCodeOverride != nil {
+		if _, err := sampleByteLength(*sampleFormatCodeOverride); err != nil {
+			return nil, fmt.Errorf("invalid SEG-Y sample format code %d: %w", *sampleFormatCodeOverride, err)
+		}
+	}
 
 	fileHeaders, err := ReadHeadersWithByteOrder(uri, r, byteOrder)
 	if err != nil {
 		return nil, fmt.Errorf("read segy headers: %w", err)
+	}
+	if sampleFormatCodeOverride != nil {
+		fileHeaders.BinaryHeader.DataSampleFormatCode = *sampleFormatCodeOverride
+	}
+
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return nil, fmt.Errorf("reader for uri does not support random access")
 	}
 
 	catalog := &TraceCatalog{
@@ -867,6 +1161,10 @@ func BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, 
 			return nil, fmt.Errorf("%w after %d traces", ErrCatalogBuildCanceled, traceNumber)
 		}
 
+		if _, err := seeker.Seek(pos, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("seek to trace header at byte %d: %w", pos, err)
+		}
+
 		traceHeaderBytes, readErr := readExact(r, TraceHeaderByteLength)
 		if readErr != nil {
 			if readErr == io.EOF {
@@ -879,6 +1177,7 @@ func BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, 
 		}
 
 		th := parseTraceHeader(traceHeaderBytes, byteOrder)
+
 		sampleCount := th.SamplesInTrace
 		if sampleCount == 0 {
 			sampleCount = fileHeaders.BinaryHeader.SamplesPerTrace
@@ -906,13 +1205,6 @@ func BuildTraceCatalogFromReaderWithByteOrderAndProgressAndCancel(uri fyne.URI, 
 			Header:           th,
 		}
 		catalog.Entries = append(catalog.Entries, entry)
-
-		if dataByteLength > 0 {
-			_, skipErr := io.CopyN(io.Discard, r, dataByteLength)
-			if skipErr != nil {
-				return nil, fmt.Errorf("skip trace payload at byte %d: %w", entry.DataOffset, skipErr)
-			}
-		}
 
 		pos += TraceHeaderByteLength + dataByteLength
 		traceNumber++
@@ -960,6 +1252,11 @@ func BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(uri f
 		return nil, fmt.Errorf("trace-only sample format code %d: %w", sampleFormatCode, sizeErr)
 	}
 
+	seeker, ok := r.(io.Seeker)
+	if !ok {
+		return nil, fmt.Errorf("reader for uri does not support random access")
+	}
+
 	catalog := &TraceCatalog{
 		URI:           uri,
 		Entries:       []TraceIndexEntry{},
@@ -981,6 +1278,10 @@ func BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(uri f
 			return nil, fmt.Errorf("%w after %d traces", ErrCatalogBuildCanceled, traceNumber)
 		}
 
+		if _, err := seeker.Seek(pos, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("seek to trace header at byte %d: %w", pos, err)
+		}
+		
 		traceHeaderBytes, readErr := readExact(r, TraceHeaderByteLength)
 		if readErr != nil {
 			if readErr == io.EOF {
@@ -1017,13 +1318,6 @@ func BuildTraceCatalogTraceOnlyFromReaderWithByteOrderAndProgressAndCancel(uri f
 			Header:           th,
 		}
 		catalog.Entries = append(catalog.Entries, entry)
-
-		if dataByteLength > 0 {
-			_, skipErr := io.CopyN(io.Discard, r, dataByteLength)
-			if skipErr != nil {
-				return nil, fmt.Errorf("skip trace payload at byte %d: %w", entry.DataOffset, skipErr)
-			}
-		}
 
 		pos += TraceHeaderByteLength + dataByteLength
 		traceNumber++

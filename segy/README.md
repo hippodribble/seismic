@@ -189,6 +189,45 @@ Each catalog entry contains:
 - `SampleCount`, `SampleFormatCode`, `SampleByteLength`
 - Parsed `TraceHeader`
 
+## Custom non-standard trace fields
+
+Some SEG-Y files include application-specific values outside the standard trace header fields. The package supports this by pairing a 1-based SEG-Y trace-header byte position with a numeric type and decoding the value at that position.
+
+Use `TraceHeaderValueType` to describe the field width and representation:
+
+```go
+fields := []segy.CustomTraceField{
+	{Name: "myFloat", Offset: 73, Type: segy.TraceHeaderValueTypeFloat32},
+	{Name: "myInt16", Offset: 41, Type: segy.TraceHeaderValueTypeInt16},
+	{Name: "myUint32", Offset: 121, Type: segy.TraceHeaderValueTypeUint32},
+}
+```
+
+Then decode one trace header or build a custom catalog:
+
+```go
+// Decode custom values from one trace header slice.
+headerValues, err := segy.ReadCustomTraceValuesFromBytes(
+	traceHeader.Raw[:],
+	fields,
+	file.ByteOrder,
+)
+if err != nil {
+	return err
+}
+
+// Or build a custom catalog with the standard trace catalog entries.
+customEntries, err := file.BuildCustomTraceCatalog(file.TraceCatalog.Entries, fields)
+if err != nil {
+	return err
+}
+
+_ = headerValues
+_ = customEntries
+```
+
+The custom values are stored as `map[string]any`, so each entry can contain a mix of numeric types such as `float32`, `int16`, `uint32`, etc. This is useful when a file contains vendor-specific metadata, auxiliary trace bookkeeping, or other non-standard fields not represented in the built-in `TraceHeader` struct.
+
 ## Query helpers
 
 ### Single-field queries
