@@ -149,6 +149,7 @@ func (p P190File) ToShapeFile(filename string) error {
 		partial := [][]shp.Point{points}
 		polyline := shp.NewPolyLine(partial)
 		shape.Write(polyline)
+		fmt.Println(l.Name)
 		shape.WriteAttribute(counter, 0, l.Name)
 		counter++
 		log.Println(counter, "tracks created")

@@ -14,43 +14,117 @@ It includes:
 
 ## API quick reference
 
+This section reflects the current exported API surface of `github.com/hippodribble/seismic/segy`.
+
+### Open and header parsing
+
 | API | Returns | Purpose |
 | --- | --- | --- |
-| `Open(uri fyne.URI)` | `(*File, error)` | Open a SEG-Y file and parse textual/binary headers. |
-| `OpenWithByteOrder(uri, order)` | `(*File, error)` | Open a SEG-Y file with explicit byte order (`binary.BigEndian` or `binary.LittleEndian`). |
-| `(*File).BuildTraceCatalog()` | `(*TraceCatalog, error)` | Scan traces and build in-memory indexes. |
-| `BuildTraceCatalogFromReader(uri, reader)` | `(*TraceCatalog, error)` | Build catalog from a stream already at byte zero. |
-| `BuildTraceCatalogFromReaderWithByteOrder(uri, reader, order)` | `(*TraceCatalog, error)` | Build catalog from a stream with explicit byte order. |
-| `(*TraceCatalog).FindEqual(field, value)` | `[]TraceIndexEntry` | Exact match query on one indexed header field. |
-| `(*TraceCatalog).FindRange(field, min, max)` | `[]TraceIndexEntry` | Inclusive range query on one indexed header field. |
-| `(*TraceCatalog).FindWhere(predicates...)` | `([]TraceIndexEntry, error)` | Multi-predicate query with AND semantics. |
-| `(*TraceCatalog).FindRangeSorted(field, min, max, keys...)` | `([]TraceIndexEntry, error)` | Range query and multi-key sorting in one call. |
-| `(*TraceCatalog).FindWhereSorted(predicates, keys...)` | `([]TraceIndexEntry, error)` | Multi-predicate query and multi-key sorting in one call. |
-| `SortTraceIndexEntries(entries, keys...)` | `error` | Sort an extracted trace set in place by one or more keys. |
-| `Asc(field)` / `Desc(field)` | `TraceSortKey` | Build ascending/descending sort keys. |
-| `GroupByField(entries, field)` | `map[int64][]TraceIndexEntry` | Group a result set by any indexed field. |
-| `GroupByEP(entries)` / `GroupByCDP(entries)` | `map[int64][]TraceIndexEntry` | Convenience grouping by EP or CDP. |
-| `(*TraceCatalog).HeaderRangeSummary()` | `TraceHeaderRangeSummary` | Min/max summary for each indexed header field. |
-| `(TraceHeaderRangeSummary).String()` | `string` | One line per header field with min/max values. |
-| `(*File).ReadTraceFromIndex(entry)` | `(TraceHeader, []byte, error)` | Read one trace using a catalog entry. |
-| `(*File).ReadTraceAtOffset(offset, sampleCount)` | `(TraceHeader, []byte, error)` | Read one trace directly by header byte offset. |
-| `DecodeTraceSamples(data, formatCode, order)` | `([]float32, error)` | Decode raw trace sample bytes to float32 values. |
-| `(*File).DecodeTraceData(data)` | `([]float32, error)` | Decode raw trace bytes using file format/byte order settings. |
-| `(*File).ReadDecodedTraceFromIndex(entry)` | `(TraceHeader, []float32, error)` | Read and decode one trace from a catalog entry. |
-| `(*File).ReadDecodedTraceAtOffset(offset, sampleCount)` | `(TraceHeader, []float32, error)` | Read and decode one trace directly by byte offset. |
-| `(*File).BuildCDPGatherFromEntries(entries)` | `(CDPGather, error)` | Build one decoded CDP gather from selected trace entries. |
-| `ApplyNMOToCDPGatherWithOptions(gather, vf, options)` | `(CDPGather, error)` | Apply NMO to a CDP gather with extrapolation and stretch-mute controls. |
-| `BuildSemblanceGatherFromCDP(gather, minVel, maxVel, velStep)` | `(SemblanceGather, error)` | Build a semblance gather on uniform squared-slowness velocity sampling. |
-| `(SemblanceGather).VelocityAxis()` | `[]float64` | Return trial velocities in gather order (low velocity to high velocity). |
-| `ApplyHighCutToCDPGather(gather, highCutHz)` | `(CDPGather, error)` | Apply a zero-phase, two-pass Butterworth high-cut filter to a CDP gather. |
-| `(*File).ReadEnsembleSamples(entries, maxTotal)` | `(EnsembleSamples, error)` | Decode many traces to a rectangular 2D sample set with a hard sample-count guard. |
-| `RenderEnsembleImage(samples, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | Convert decoded 2D samples to a paletted image with clipping and zero-centering support. |
-| `(*File).RenderEnsembleFromEntries(entries, maxTotal, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | One-call read/decode/render from selected trace entries with threshold guard. |
-| `(*File).QueryAndRenderEnsemble(predicates, sortKeys, maxTotal, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | One-call query, optional sort, threshold check, and image render. |
-| `GrayscalePalette256()` | `color.Palette` | 256-color grayscale palette from black to white. |
-| `BlueWhiteRedPalette256()` | `color.Palette` | 256-color diverging palette from blue through white to red. |
-| `InvertPalette(palette)` | `color.Palette` | Returns a reversed copy of a palette. |
-| `MustPalette256(palette)` | `color.Palette` | Normalizes palette to 256 entries (panics if empty). |
+| `Open(uri)` | `(*File, error)` | Open SEG-Y with default conventions. |
+| `OpenWithByteOrder(uri, byteOrder)` | `(*File, error)` | Open with explicit endianness. |
+| `OpenSEGYWithByteOrderAndFormat(uri, byteOrder, sampleFormatCode)` | `(*File, error)` | Open SEG-Y with explicit byte order and sample format override. |
+| `OpenSU(uri)` | `(*File, error)` | Open Seismic Unix style trace stream. |
+| `OpenSUWithByteOrder(uri, byteOrder)` | `(*File, error)` | Open SU with explicit endianness. |
+| `OpenSUWithByteOrderAndFormat(uri, byteOrder, sampleFormatCode)` | `(*File, error)` | Open SU with explicit endianness and sample format override. |
+| `ReadHeaders(uri, r)` | `(*File, error)` | Parse SEG-Y/SU headers from an existing reader. |
+| `ReadHeadersWithByteOrder(uri, r, byteOrder)` | `(*File, error)` | Parse headers from reader with explicit endianness. |
+
+### Catalog building and progress/cancel variants
+
+| API family | Returns | Purpose |
+| --- | --- | --- |
+| `(*File).BuildTraceCatalog*` | `(*TraceCatalog, error)` | Build a catalog from an opened file, with standard and trace-only variants plus progress/cancel callbacks. |
+| `BuildTraceCatalogFromReader*` | `(*TraceCatalog, error)` | Build a standard catalog directly from an `io.Reader`, including byte-order, sample-format, progress, and cancel variants. |
+| `BuildTraceCatalogTraceOnlyFromReader*` | `(*TraceCatalog, error)` | Build a trace-only catalog from an `io.Reader`, including byte-order, progress, and cancel variants. |
+
+### Querying, sorting, grouping, and summaries
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `(*TraceCatalog).FindEqual(field, value)` | `[]TraceIndexEntry` | Exact match by indexed field. |
+| `(*TraceCatalog).FindRange(field, minValue, maxValue)` | `[]TraceIndexEntry` | Inclusive range query by indexed field. |
+| `(*TraceCatalog).FindWhere(predicates...)` | `([]TraceIndexEntry, error)` | Multi-predicate AND query. |
+| `(*TraceCatalog).FindRangeSorted(field, minValue, maxValue, keys...)` | `([]TraceIndexEntry, error)` | Range query plus sorting. |
+| `(*TraceCatalog).FindWhereSorted(predicates, keys...)` | `([]TraceIndexEntry, error)` | Predicate query plus sorting. |
+| `(*TraceCatalog).FindByTRACR(tracr)` / `FindByTRACF(tracf)` / `FindEnsembleByEP(ep)` | `[]TraceIndexEntry` | Convenience lookups by common fields. |
+| `SortTraceIndexEntries(entries, keys...)` | `error` | In-place sort for extracted entry slices. |
+| `Asc(field)` / `Desc(field)` | `TraceSortKey` | Build sort keys. |
+| `EqualPredicate(field, value)` / `RangePredicate(field, minValue, maxValue)` | `TraceQueryPredicate` | Build reusable predicates. |
+| `GroupByField(entries, field)` / `GroupByEP(entries)` / `GroupByCDP(entries)` | `map[int64][]TraceIndexEntry` | Group query results by field. |
+| `(*TraceCatalog).HeaderRangeSummary()` | `TraceHeaderRangeSummary` | Min/max summary for indexed fields. |
+| `(TraceHeaderRangeSummary).String()` | `string` | Render summary as text. |
+
+### Trace reading and sample decoding
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `(*File).ReadTraceFromIndex(entry)` | `(TraceHeader, []byte, error)` | Read one raw trace by catalog entry. |
+| `(*File).ReadTraceAtOffset(headerOffset, sampleCount)` | `(TraceHeader, []byte, error)` | Read one raw trace by byte offset. |
+| `DecodeTraceSamples(traceData, sampleFormatCode, byteOrder)` | `([]float32, error)` | Decode raw sample bytes into `float32`. |
+| `(*File).DecodeTraceData(traceData)` | `([]float32, error)` | Decode raw sample bytes using file settings. |
+| `(*File).ReadDecodedTraceFromIndex(entry)` | `(TraceHeader, []float32, error)` | Read and decode by catalog entry. |
+| `(*File).ReadDecodedTraceAtOffset(headerOffset, sampleCount)` | `(TraceHeader, []float32, error)` | Read and decode by offset. |
+| `ReadTraceHeader(r)` / `ReadTraceHeaderWithByteOrder(r, byteOrder)` | `(TraceHeader, error)` | Decode one trace header from stream bytes. |
+
+### Custom trace-header values
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `DecodeTraceHeaderValue(data, valueType, byteOrder)` | `(any, error)` | Decode one typed value from bytes. |
+| `ReadCustomTraceValuesFromBytes(traceHeader, fields, byteOrder)` | `(map[string]any, error)` | Decode multiple custom values from one header slice. |
+| `(*File).ReadTraceHeaderValueAtOffset(headerOffset, valueOffset, valueType)` | `(any, error)` | Read one custom value at byte offset from file. |
+| `(*File).ReadCustomTraceValuesAtOffset(headerOffset, fields)` | `(map[string]any, error)` | Read many custom values from one header in file. |
+| `(*File).BuildCustomTraceCatalog(entries, fields)` | `([]CustomTraceIndexEntry, error)` | Attach custom decoded fields to catalog entries. |
+
+### Gather construction, velocity analysis, and stacking
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `(*File).BuildCDPGatherByCDP(cdp, sortByOffset)` | `(CDPGather, error)` | Build a decoded CDP gather from catalog selection. |
+| `(*File).BuildCDPGatherFromEntries(entries)` | `(CDPGather, error)` | Build decoded gather from explicit trace entries. |
+| `ApplyNMOToCDPGather(gather, velocity)` | `(CDPGather, error)` | Apply NMO with default options. |
+| `ApplyNMOToCDPGatherWithOptions(gather, velocity, options)` | `(CDPGather, error)` | Apply NMO with explicit options. |
+| `ApplyNMOToCDPGatherWithOptionsAndMask(gather, velocity, options)` | `(CDPGather, StretchMuteMask, error)` | Apply NMO and return stretch-mute mask. |
+| `BuildSemblanceGatherFromCDP*` | `(SemblanceGather, error)` | Build semblance gathers using base, smoothing, power, and stretch-mute variants. |
+| `(SemblanceGather).VelocityAxis()` | `[]float64` | Trial velocity axis in gather order. |
+| `StackCDPGatherMean(gather, muteMask)` | `(StackedTrace, error)` | Mean stack with optional mute mask. |
+
+### Filtering, autocorrelation, smoothing, and time shifts
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `ApplyHighCutToCDPGather(gather, highCutHz)` | `(CDPGather, error)` | Zero-phase high-cut filter on gather traces. |
+| `ApplyPolygonalFrequencyFilter(samples, sampleIntervalMS, frequencies, amplitudes)` | `([]float32, error)` | Polygonal frequency-domain amplitude filter for one trace. |
+| `ApplyPolygonalFrequencyFilterToCDPGather(gather, frequencies, amplitudes)` | `(CDPGather, error)` | Polygonal filter applied to every trace in gather. |
+| `Autocorrelation(trace, maxLag, twoSided)` | `([]float32, error)` | Raw autocorrelation for one trace. |
+| `NormalizedAutocorrelation(trace, maxLag, twoSided)` | `([]float32, error)` | Autocorrelation normalized by lag-0 energy. |
+| `AutocorrelationForTraceSet(traces, maxLag, twoSided)` | `([][]float32, error)` | Raw autocorrelation for multiple traces. |
+| `NormalizedAutocorrelationForTraceSet(traces, maxLag, twoSided)` | `([][]float32, error)` | Normalized autocorrelation for multiple traces. |
+| `SmoothTraceTimeRunningAverage(trace, windowLength)` | `([]float32, error)` | Running-average smoothing for one trace. |
+| `SmoothEnsembleSamplesTimeRunningAverage(samples, windowLength)` | `(EnsembleSamples, error)` | Running-average smoothing for all traces in an ensemble. |
+| `ShiftTraceBySamplesFrequencyDomain(samples, shiftSamples)` | `([]float32, error)` | Frequency-domain fractional sample shift with non-wrapping truncation. |
+| `ShiftEnsembleSamplesBySamplesFrequencyDomain(ensemble, shiftSamples)` | `(EnsembleSamples, error)` | Apply the same frequency-domain shift to every trace in an ensemble. |
+
+### Ensemble decode/render and palettes
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `(*File).ReadEnsembleSamples(entries, maxTotalImageSamples)` | `(EnsembleSamples, error)` | Decode selected traces into rectangular sample matrix. |
+| `RenderEnsembleImage(samples, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | Map decoded samples to palette image with clipping/gain options. |
+| `(*File).RenderEnsembleFromEntries(entries, maxTotalImageSamples, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | Read/decode/render in one call. |
+| `(*File).QueryAndRenderEnsemble(predicates, sortKeys, maxTotalImageSamples, opts)` | `(*image.Paletted, EnsembleImageStats, error)` | Query/sort/read/decode/render in one call. |
+| `GrayscalePalette256()` | `color.Palette` | 256-step grayscale palette. |
+| `BlueWhiteRedPalette256()` | `color.Palette` | 256-step blue-white-red diverging palette. |
+| `BlueRedWhitePalette256()` | `color.Palette` | 256-step blue-red-white diverging palette. |
+| `ThreePointHSVPalette256(low, mid, high)` | `color.Palette` | 256-step palette interpolated from three HSV anchors. |
+| `InvertPalette(p)` | `color.Palette` | Reverse palette order. |
+| `MustPalette256(p)` | `color.Palette` | Normalize to 256 entries (panics if empty). |
+
+### Export
+
+| API | Returns | Purpose |
+| --- | --- | --- |
+| `(*File).ExportTraces(w, entries, options)` | `(int, error)` | Write selected traces to output stream with configurable header inclusion. |
 
 ## Recommended workflow
 

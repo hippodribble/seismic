@@ -11,8 +11,8 @@ import (
 
 func loadTestFile() {
 
-	uri := storage.NewFileURI("/Users/glenn/Documents/Data/Miyazaki-Oki/NFH Data/test.segy")
-	f, err := segy.OpenWithByteOrder(uri,binary.LittleEndian)
+	uri := storage.NewFileURI("/Users/glenn/Documents/Data/JOGMEC Tosa/NFH Data/a.segy")
+	f, err := segy.OpenSEGYWithByteOrderAndFormat(uri, binary.BigEndian, 1)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -41,7 +41,7 @@ func loadTestFile() {
 	headerValues, err := segy.ReadCustomTraceValuesFromBytes(
 		traceHeader.Raw[:],
 		fields,
-		binary.LittleEndian,
+		binary.BigEndian,
 	)
 	if err != nil {
 		statusChannel <- "error reading custom trace values: " + err.Error()

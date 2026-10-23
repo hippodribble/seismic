@@ -9,33 +9,42 @@ import (
 )
 
 var statusCh chan string
+var progressCh chan float64
 var winMain fyne.Window
 var manager *layermanager.LayerManager
 var bOpen *widget.Button
+var progress *widget.ProgressBar
+var status *widget.Label
 
 func main() {
+
 	a := app.NewWithID("com.github.hippodribble.seismic.postplotter")
 	winMain = a.NewWindow("P1/11 Post-Plot")
 	winMain.SetContent(gui())
 	winMain.Resize(fyne.NewSize(1000, 700))
 	winMain.ShowAndRun()
+
 }
 
 func gui() fyne.CanvasObject {
-	statusCh = make(chan string, 32)
-	monitorStatusChannel(statusCh)	
-	status := widget.NewLabel("Ready")
-	go func() {
-		for msg := range statusCh {
-			fyne.Do(func() {
-				status.SetText(msg)
-			})
-		}
-	}()
 
-	bOpen=widget.NewButton("Open", func() {
-			folderOpen()
-		})
+	statusCh = make(chan string, 32)
+	monitorStatusChannel(statusCh)
+
+	progressCh = make(chan float64, 32)
+	monitorProgressChannel(progressCh)
+
+	status = widget.NewLabel("Ready")
+
+	progress = widget.NewProgressBar()
+
+	bOpen = widget.NewButton("Open", func() {
+		folderOpen()
+	})
+
+	bExport := widget.NewButton("Export", func() {
+		exportPolylines()
+	})
 
 	menu := container.NewHBox(
 		bOpen,
@@ -46,6 +55,7 @@ func gui() fyne.CanvasObject {
 				manager.SetMode(layermanager.ModeNone)
 			}
 		}),
+		bExport,
 	)
 
 	manager = layermanager.NewLayerManager()
@@ -53,17 +63,26 @@ func gui() fyne.CanvasObject {
 	manager.SetStatusChannel(statusCh)
 	manager.SetMode(layermanager.ModeNone)
 
-	statusBar := container.NewBorder(nil, nil, nil, nil, status)
+	statusBar := container.NewBorder(nil, nil, nil, progress, status)
 	return container.NewBorder(menu, statusBar, nil, nil, manager)
+
 }
 
 func monitorStatusChannel(ch chan string) {
 	go func() {
 		for msg := range ch {
 			fyne.Do(func() {
-				// Here you can add any additional logic to handle the status messages
-				// For example, you could log them or update a status bar in the GUI
-				statusCh <- msg
+				status.SetText(msg)
+			})
+		}
+	}()
+}
+
+func monitorProgressChannel(ch chan float64) {
+	go func() {
+		for update := range ch {
+			fyne.Do(func() {
+				progress.SetValue(update)
 			})
 		}
 	}()

@@ -134,13 +134,37 @@ func main() {
 	fmt.Println(a.Metadata())
 	initOptions()
 
-	winMain = a.NewWindow("SEGY Load & Display Test")
+	winMain = a.NewWindow(defaultWindowTitle)
 	winMain.SetContent(gui())
 	winMain.Resize(fyne.NewSize(1500, 1000))
 	winMain.SetFullScreen(true)
 	installKeyboardNavigation()
 	tryRestoreLastSEGYSession()
 	winMain.ShowAndRun()
+}
+
+const defaultWindowTitle = "SEGY Viewer"
+
+func windowTitleForURI(uri fyne.URI) string {
+	if uri == nil {
+		return defaultWindowTitle
+	}
+
+	if strings.EqualFold(uri.Scheme(), "file") {
+		if p := strings.TrimSpace(uri.Path()); p != "" {
+			return p
+		}
+	}
+
+	if s := strings.TrimSpace(uri.String()); s != "" {
+		return s
+	}
+
+	if n := strings.TrimSpace(uri.Name()); n != "" {
+		return n
+	}
+
+	return defaultWindowTitle
 }
 
 func installKeyboardNavigation() {
@@ -574,7 +598,6 @@ func loader() {
 			return
 		}
 
-		winMain.SetTitle(uri.Name())
 		if loadErr := loadSEGYFromURI(uri, true); loadErr != nil {
 			dialog.ShowError(loadErr, winMain)
 			return
@@ -668,6 +691,10 @@ func loadSEGYFromURI(uri fyne.URI, resetRanges bool) error {
 
 	if p := prefs(); p != nil {
 		p.SetString(prefLastSEGYURI, uri.String())
+	}
+
+	if winMain != nil {
+		winMain.SetTitle(windowTitleForURI(uri))
 	}
 
 	return nil

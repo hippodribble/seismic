@@ -60,3 +60,38 @@ func ShiftTraceBySamplesFrequencyDomain(samples []float32, shiftSamples float64)
 
 	return out, nil
 }
+
+// ShiftEnsembleSamplesBySamplesFrequencyDomain shifts all traces in an ensemble
+// by a fractional number of samples using frequency-domain phase multiplication.
+//
+// Positive shiftSamples delays traces in time. Wrapped edges are zeroed, so the
+// result is truncated instead of circular.
+func ShiftEnsembleSamplesBySamplesFrequencyDomain(ensemble EnsembleSamples, shiftSamples float32) (EnsembleSamples, error) {
+	out := EnsembleSamples{
+		Traces:            make([][]float32, len(ensemble.Traces)),
+		TraceCount:        ensemble.TraceCount,
+		SamplesPerTrace:   ensemble.SamplesPerTrace,
+		TotalImageSamples: ensemble.TotalImageSamples,
+	}
+
+	shift := float64(shiftSamples)
+	for i := range ensemble.Traces {
+		shifted, err := ShiftTraceBySamplesFrequencyDomain(ensemble.Traces[i], shift)
+		if err != nil {
+			return EnsembleSamples{}, fmt.Errorf("shift trace %d: %w", i, err)
+		}
+		out.Traces[i] = shifted
+	}
+
+	if out.TraceCount == 0 {
+		out.TraceCount = len(out.Traces)
+	}
+	if out.SamplesPerTrace == 0 && len(out.Traces) > 0 {
+		out.SamplesPerTrace = len(out.Traces[0])
+	}
+	if out.TotalImageSamples == 0 && out.TraceCount > 0 && out.SamplesPerTrace > 0 {
+		out.TotalImageSamples = int64(out.TraceCount) * int64(out.SamplesPerTrace)
+	}
+
+	return out, nil
+}
